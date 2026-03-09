@@ -1,0 +1,72 @@
+LOAD FILE=./forcekernelabf_v5_0_0.cpp
+
+UNITS NATURAL
+
+d1: DISTANCE ATOMS=1,2 COMPONENTS
+
+# --- Define the Muller-Brown potential ---
+# V(x,y) = sum_{k=1}^{4} A_k * exp[ a_k*(x-x0_k)^2 + b_k*(x-x0_k)*(y-y0_k) + c_k*(y-y0_k)^2 ]
+#
+# Parameters:
+#   k=1: A=-200, a=-1,   b=0,   c=-10,  x0=1,    y0=0
+#   k=2: A=-100, a=-1,   b=0,   c=-10,  x0=0,    y0=0.5
+#   k=3: A=-170, a=-6.5, b=11,  c=-6.5, x0=-0.5, y0=1.5
+#   k=4: A=15,   a=0.7,  b=0.6, c=0.7,  x0=-1,   y0=1
+
+ff: MATHEVAL ...
+  ARG=d1.x,d1.y
+  PERIODIC=NO
+  FUNC=0.2*(-200*exp(-(x-1)^2-10*y^2)-100*exp(-x^2-10*(y-0.5)^2)-170*exp(-6.5*(x+0.5)^2+11*(x+0.5)*(y-1.5)-6.5*(y-1.5)^2)+15*exp(0.7*(x+1)^2+0.6*(x+1)*(y-1)+0.7*(y-1)^2))
+...
+
+# --- Apply the potential ---
+bb: BIASVALUE ARG=ff
+
+
+#eabf: DRR ...
+#   ARG=d1.x,d1.y 
+#   FULLSAMPLES=500 
+#   GRID_MIN=-1.5,-0.5 
+#   GRID_MAX=1.5,2.5
+#   GRID_BIN=100,100 
+#   FRICTION=8.0,8.0 
+#   TAU=0.5,0.5
+#   TEMP=1 
+#   OUTPUTFREQ=50000 
+#   HISTORYFREQ=500000 
+#...
+
+fk: FKERNELABF ...
+
+    ARG=d1.x,d1.y
+
+    # Extended Lagrangian
+    KAPPA=3000.0,3000.0       # kJ/mol/nm^2 — coupling width sqrt(kT/kappa)=0.022 nm
+    TAU=0.5,0.5              # ps
+    FRICTION=8.0        # ps^-1
+    TEMP=1
+
+    # Kernel representation
+    # Non-periodic: GRIDMIN/GRIDMAX required
+    GRIDMIN=-1.5,-0.5
+    GRIDMAX=1.5,2.5
+    SIGMA=0.05,0.05           # nm — initial kernel width (~1/10 of domain)
+    SIGMA_MIN=0.01,0.01       # nm — floor: ~1.5*sqrt(kT/kappa)
+    PACE=5
+    GRIDPACE=1000
+    GRIDSIZE=100
+
+    # Boost (helpful for early exploration of 3-basin surface)
+    BIASFACTOR=1
+
+    # Output
+    KERNELSTRIDE=50000
+    CZARSTRIDE=50000
+...
+
+#UPPER_WALLS ARG=d1.x AT=1.2  KAPPA=1500
+#LOWER_WALLS ARG=d1.x AT=-1.4 KAPPA=1500
+#UPPER_WALLS ARG=d1.y AT=2.0  KAPPA=1500
+#LOWER_WALLS ARG=d1.y AT=-0.2 KAPPA=1500
+
+PRINT FILE=COLVAR STRIDE=50 ARG=*
