@@ -1,83 +1,83 @@
-#!/usr/bin/env python3
-"""
-czar_integrate.py
-=================
-Recover the true free energy landscape (FEL) along the real CV z from
-the z-kernel CZAR file written by FKERNELABF v5.
 
-Theory
-------
-CZAR (Lesage et al. J. Phys. Chem. B 2017) gives the mean force along the
-REAL CV z as:
 
-    dA/dz_i = <kappa_i*(lambda_i - z_i)>_z  -  kT * d/dz_i ln p̃(z)
 
-In terms of quantities stored in the z-kernel file
-(mu_k stores kappa*(z - lambda), the negative of the CZAR spring term):
 
-    dA/dz_i = -mu_NW_i(z)  +  kT * sum_k w_k(z) * (z_i - c_ki) / (2*sigma_ki^2)
 
-where
-    G_k(z) = exp( -sum_d (z_d - c_kd)^2 / (4*sigma_kd^2) )
-    p̃(z)  = sum_k Nk * G_k(z)
-    w_k(z) = Nk * G_k(z) / p̃(z)          (normalised weights)
-    mu_NW_i(z) = sum_k w_k(z) * mu_ki      (Nadaraya-Watson regression)
 
-Both terms are evaluated analytically from the kernel list — no bins anywhere.
-The kernel cutoff is applied at NSIGMA*sigma per dimension (default 4).
 
-After computing the gradient field, A(z) is recovered by:
-  • 1-D: cumulative trapezoid integration.
-  • 2-D: Poisson FFT  ∇²A = div(grad A)  with even-extension for non-periodic
-         dimensions and standard FFT for periodic ones.
-  • 3-D: same Poisson approach extended to 3 axes.
 
-Usage
------
-    python czar_integrate.py --czar czar_kernels.dat [OPTIONS]
 
-Options
--------
-    --czar FILE         CZAR kernel file (required)
-    --grid N            Grid points per dimension (default: 100)
-    --nsigma N          Kernel cutoff in sigma units (default: 4.0)
-    --output FILE       Output FEL file (default: FEL_czar.dat)
-    --min V [V ...]     Override grid min per dim (use for non-periodic if needed)
-    --max V [V ...]     Override grid max per dim
-    --kT VALUE          Override kT from file (kJ/mol)
-    --minpop FRAC       Mask grid points where p̃(z) < FRAC*max(p̃) (default 1e-5)
-    --verbose           Print extra diagnostics
 
-Output format (space-separated):
-    z0 [z1 [z2]]   czar_grad0 [czar_grad1 [czar_grad2]]   ptilde   A_czar
-    (A_czar set to NaN where p̃ < minpop threshold)
 
-Examples
---------
-    # Alanine dipeptide: phi/psi (both periodic -pi..pi)
-    python czar_integrate.py --czar czar_kernels.dat --grid 100 --output FEL.dat
 
-    # Non-periodic CV, override grid range
-    python czar_integrate.py --czar czar_kernels.dat --grid 150 \\
-        --min -2.0 --max 2.0 --output FEL.dat
-"""
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 
 import argparse
 import sys
 import numpy as np
 
 
-# ─────────────────────── file reader ─────────────────────────────────────────
+
 
 def parse_czar_file(path):
-    """
-    Parse the CZAR kernel file written by FKERNELABF v5.
+    
 
-    Returns
-    -------
-    meta : dict   with keys: dim, kT, kappa, periodic, domMin, domMax, nkernels
-    kernels : list of dicts  with keys: Nk, center, mu, sigma   (all 1-D arrays)
-    """
+
+
+
+
+
+
     meta = {}
     kernels = []
     dim = None
@@ -106,12 +106,12 @@ def parse_czar_file(path):
             elif key == 'nkernels':
                 meta['nkernels'] = int(parts[1])
             else:
-                # Data line: Nk  center[0..d-1]  mu[0..d-1]  sigma[0..d-1]
+                
                 if dim is None:
                     continue
                 vals = [float(x) for x in parts]
                 if len(vals) != 1 + 3 * dim:
-                    continue   # malformed line, skip
+                    continue   
                 Nk    = vals[0]
                 center= np.array(vals[1        : 1+dim])
                 mu    = np.array(vals[1+dim    : 1+2*dim])
@@ -123,7 +123,7 @@ def parse_czar_file(path):
     if 'kT' not in meta:
         sys.exit("ERROR: kT not found in CZAR file header")
 
-    # Validate required metadata
+    
     for key in ('kT', 'kappa', 'periodic', 'domMin', 'domMax'):
         if key not in meta:
             print(f"WARNING: '{key}' not found in CZAR file — using defaults may be unsafe.")
@@ -131,14 +131,14 @@ def parse_czar_file(path):
     return meta, kernels
 
 
-# ─────────────────────── grid construction ────────────────────────────────────
+
 
 def build_grid(meta, args):
-    """
-    Build the evaluation grid, honouring periodic domains and user overrides.
+    
 
-    Returns: coords_per_dim (list of 1-D arrays), grid shape (tuple)
-    """
+
+
+
     dim = meta['dim']
     periodic = meta.get('periodic', np.zeros(dim, dtype=bool))
     domMin   = meta.get('domMin',   np.zeros(dim))
@@ -153,8 +153,8 @@ def build_grid(meta, args):
     coords = []
     for d in range(dim):
         if periodic[d]:
-            # For periodic CVs, use N points evenly covering the period
-            # (exclude the endpoint to avoid double-counting)
+            
+            
             pts = np.linspace(gmin[d], gmax[d], args.grid, endpoint=False)
         else:
             pts = np.linspace(gmin[d], gmax[d], args.grid)
@@ -163,46 +163,46 @@ def build_grid(meta, args):
     return coords, periodic, gmin, gmax
 
 
-# ─────────────────────── kernel evaluation (core) ────────────────────────────
+
 
 def periodic_delta(delta, period):
-    """Wrap delta into (-period/2, period/2]."""
+    
     return delta - period * np.round(delta / period)
 
 
 def czar_on_grid(coords, periodic, kernels, kT, nsigma, verbose=False):
-    """
-    Evaluate the CZAR gradient field and biased density p̃(z) on the grid.
+    
 
-    Parameters
-    ----------
-    coords   : list of 1-D arrays, one per dim
-    periodic : bool array, length dim
-    kernels  : list of kernel dicts
-    kT       : float
-    nsigma   : float, cutoff in sigma units
 
-    Returns
-    -------
-    ptilde  : ndarray, shape = (*grid_shape,)
-    czar_grad : ndarray, shape = (*grid_shape, dim)
-    """
+
+
+
+
+
+
+
+
+
+
+
+
+
     dim = len(coords)
     shape = tuple(len(c) for c in coords)
     period = np.zeros(dim)
     for d in range(dim):
         if periodic[d]:
             period[d] = coords[d][-1] - coords[d][0]
-            # Correct: for N evenly-spaced points in [a,b) the period is b-a
+            
             period[d] += coords[d][1] - coords[d][0]
 
-    # Meshgrid of evaluation points: shape (*shape, dim)
-    mg = np.meshgrid(*coords, indexing='ij')   # each mg[d] has shape (*shape,)
-    z_grid = np.stack(mg, axis=-1)             # (*shape, dim)
+    
+    mg = np.meshgrid(*coords, indexing='ij')   
+    z_grid = np.stack(mg, axis=-1)             
 
     ptilde    = np.zeros(shape)
-    sum_wkmu  = np.zeros((*shape, dim))   # for mu_NW: sum_k Nk G_k(z) mu_k
-    # For the log-grad term: sum_k Nk G_k(z) * (z_d - c_kd) / (2 sigma_kd^2)
+    sum_wkmu  = np.zeros((*shape, dim))   
+    
     sum_wkdz  = np.zeros((*shape, dim))
 
     n_total = len(kernels)
@@ -217,18 +217,18 @@ def czar_on_grid(coords, periodic, kernels, kT, nsigma, verbose=False):
         mu_k   = kern['mu']
         sigma  = kern['sigma']
 
-        # Displacement z - c_k for each grid point: shape (*shape, dim)
-        dz = z_grid - center   # (*shape, dim)
-        # Apply periodic wrapping per dimension
+        
+        dz = z_grid - center   
+        
         for d in range(dim):
             if periodic[d] and period[d] > 0:
                 dz[..., d] = periodic_delta(dz[..., d], period[d])
 
-        # Kernel exponent: -sum_d dz_d^2 / (4 sigma_d^2), shape (*shape,)
-        inv4sig2 = 1.0 / (4.0 * sigma**2 + 1e-300)   # (dim,)
-        exponent = np.einsum('...d,d->...', dz**2, inv4sig2)  # (*shape,)
+        
+        inv4sig2 = 1.0 / (4.0 * sigma**2 + 1e-300)   
+        exponent = np.einsum('...d,d->...', dz**2, inv4sig2)  
 
-        # Apply cutoff: only compute where exponent < nsigma^2
+        
         mask = exponent < nsigma**2
         if not np.any(mask):
             continue
@@ -237,32 +237,32 @@ def czar_on_grid(coords, periodic, kernels, kT, nsigma, verbose=False):
         Gk[mask] = np.exp(-exponent[mask])
 
         norm = 1.0 / np.prod(sigma)
-        wk = Nk * norm * Gk  # (*shape,)
+        wk = Nk * norm * Gk  
 
         ptilde   += wk
-        sum_wkmu += wk[..., np.newaxis] * mu_k   # broadcast over dim
+        sum_wkmu += wk[..., np.newaxis] * mu_k   
 
-        # (z_d - c_kd) / (2 sigma_d^2): shape (*shape, dim)
+        
         inv2sig2 = 1.0 / (2.0 * sigma**2 + 1e-300)
-        dz_scaled = dz * inv2sig2   # (*shape, dim)
+        dz_scaled = dz * inv2sig2   
         sum_wkdz += wk[..., np.newaxis] * dz_scaled
 
-    # Assemble CZAR gradient  (Lesage et al. 2017, eq. 6 / COLVARS convention)
-    #
-    # With kernel G_k = exp(-dz^2/(4 sig^2)):
-    #   d G_k / dz_i = G_k * ( -(z_i - c_ki) / (2 sig_i^2) )
-    #   kT * d ln p_tilde / dz_i = -kT * sum_k w_k * (z_i-c_ki)/(2 sig_i^2)
-    #                             = -kT * sum_wkdz_i / p_tilde
-    #
-    # CZAR:
-    #   dA/dz_i = -mu_NW_i  +  kT * d ln p_tilde / dz_i
-    #           = -mu_NW_i  -  kT * sum_wkdz_i / p_tilde
-    #
-    # Both terms are NEGATIVE (reinforcing) in high-gradient regions.
-    # An earlier version had +kT*sum_wkdz (wrong sign) which caused
-    # the two terms to partially cancel and inflated the integrated FEL.
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
 
-    safe_ptilde = np.where(ptilde > 0, ptilde, 1.0)  # avoid /0; mask later
+    safe_ptilde = np.where(ptilde > 0, ptilde, 1.0)  
     czar_grad = np.zeros((*shape, dim))
     for d in range(dim):
         czar_grad[..., d] = (-sum_wkmu[..., d] - kT * sum_wkdz[..., d]) / safe_ptilde
@@ -270,94 +270,94 @@ def czar_on_grid(coords, periodic, kernels, kT, nsigma, verbose=False):
     return ptilde, czar_grad
 
 
-# ─────────────────────── 1-D integration ─────────────────────────────────────
+
 
 def integrate_1d(grad, dx, periodic):
-    """Cumulative trapezoid integration of a 1-D gradient."""
+    
     from numpy import cumsum
     A = np.zeros_like(grad)
     A[1:] = np.cumsum(0.5 * (grad[:-1] + grad[1:]) * dx)
     if periodic:
-        # Remove linear drift due to finite-sampling inconsistency
+        
         N = len(A)
         drift = A[-1] / (N - 1)
         A -= np.arange(N) * drift
     return A
 
 
-# ─────────────────────── N-D Poisson integration ─────────────────────────────
+
 
 def poisson_integrate(czar_grad, coords, periodic):
-    """
-    Recover A(z) from the gradient field via Poisson equation:
-        laplacian(A) = divergence(czar_grad)
+    
 
-    Uses FFT (full periodic) or even-extension trick (non-periodic) per axis,
-    mirroring exactly the approach in the C++ reconstructBiasGrid().
 
-    Parameters
-    ----------
-    czar_grad : ndarray, shape (*shape, dim)
-    coords    : list of 1-D arrays
-    periodic  : bool array
 
-    Returns
-    -------
-    A : ndarray, shape (*shape,)
-    """
+
+
+
+
+
+
+
+
+
+
+
+
+
     dim = len(coords)
     shape = tuple(len(c) for c in coords)
     dx    = np.array([c[1]-c[0] for c in coords])
 
-    # ── 1. compute divergence field on the original grid ──────────────────────
+    
     div = np.zeros(shape)
     for d in range(dim):
         g = czar_grad[..., d]
         if periodic[d]:
-            # Central difference with periodic wrap
+            
             gp = np.roll(g, -1, axis=d)
             gm = np.roll(g, +1, axis=d)
             div += (gp - gm) / (2.0 * dx[d])
         else:
-            # One-sided at boundaries, central elsewhere
+            
             slc_p = [slice(None)] * dim
             slc_m = [slice(None)] * dim
             slc   = [slice(None)] * dim
 
-            # Interior
+            
             slc[d]  = slice(1, -1)
             slc_p[d]= slice(2, None)
             slc_m[d]= slice(None, -2)
             div[tuple(slc)] += (g[tuple(slc_p)] - g[tuple(slc_m)]) / (2.0 * dx[d])
 
-            # Left boundary
+            
             slc_lb    = [slice(None)] * dim; slc_lb[d]  = 0
             slc_lb1   = [slice(None)] * dim; slc_lb1[d] = 1
             div[tuple(slc_lb)] += (g[tuple(slc_lb1)] - g[tuple(slc_lb)]) / dx[d]
 
-            # Right boundary
+            
             slc_rb    = [slice(None)] * dim; slc_rb[d]  = -1
             slc_rb1   = [slice(None)] * dim; slc_rb1[d] = -2
             div[tuple(slc_rb)] += (g[tuple(slc_rb)] - g[tuple(slc_rb1)]) / dx[d]
 
-    # Subtract mean (Poisson requires zero-mean RHS for periodic / Neumann BCs)
+    
     div -= div.mean()
 
-    # ── 2. extended grid for non-periodic dimensions ──────────────────────────
+    
     ext_shape = tuple(
         shape[d] if periodic[d] else (2*(shape[d]-1) if shape[d]>1 else 1)
         for d in range(dim)
     )
 
-    # Fill extended array by even-reflection
+    
     div_ext = np.zeros(ext_shape)
-    # Index slicers for the original and reflected parts
+    
     orig_slices = tuple(slice(0, shape[d]) for d in range(dim))
     div_ext[orig_slices] = div
 
     for d in range(dim):
         if not periodic[d] and shape[d] > 1:
-            # Reflect: index j -> 2*(N-1) - j for j in [N, 2N-3]
+            
             N = shape[d]
             ext_N = ext_shape[d]
             for j in range(N, ext_N):
@@ -368,50 +368,50 @@ def poisson_integrate(czar_grad, coords, periodic):
                 dst[d] = j
                 div_ext[tuple(dst)] = div_ext[tuple(src)]
 
-    # ── 3. FFT, divide by eigenvalues, IFFT ──────────────────────────────────
+    
     Fd = np.fft.fftn(div_ext)
 
-    # Build eigenvalue array: lambda_k = sum_d 2*(cos(2pi*k_d/N_d)-1)/dx_d^2
+    
     freq_arrays = []
     for d in range(dim):
         Nd = ext_shape[d]
-        ks = np.fft.fftfreq(Nd, d=1.0/Nd).astype(int)  # 0..Nd-1 in FFT order
+        ks = np.fft.fftfreq(Nd, d=1.0/Nd).astype(int)  
         eig_d = (2.0*np.cos(2.0*np.pi*ks/Nd) - 2.0) / dx[d]**2
         freq_arrays.append(eig_d)
 
-    # Outer sum of eigenvalues
+    
     eigenvals = np.zeros(ext_shape)
     for d in range(dim):
         shape_broadcast = [1]*dim
         shape_broadcast[d] = ext_shape[d]
         eigenvals += freq_arrays[d].reshape(shape_broadcast)
 
-    # Avoid dividing the DC component (set to zero = arbitrary additive constant)
+    
     with np.errstate(divide='ignore', invalid='ignore'):
         Fd_sol = np.where(eigenvals != 0, Fd / eigenvals, 0.0)
 
     A_ext = np.fft.ifftn(Fd_sol).real
 
-    # ── 4. Extract solution on original grid ──────────────────────────────────
+    
     A = A_ext[orig_slices]
 
-    # Remove global minimum (set reference)
+    
     A -= A.min()
 
     return A
 
 
-# ─────────────────────── output writer ───────────────────────────────────────
+
 
 def write_output(path, coords, periodic, ptilde, czar_grad, A, minpop, kT):
-    """Write the FEL and gradient to a space-separated text file."""
+    
     dim = len(coords)
     shape = tuple(len(c) for c in coords)
 
     ptilde_max = ptilde.max()
     pop_threshold = minpop * ptilde_max if ptilde_max > 0 else 0.0
 
-    # Build header
+    
     header_parts = ['#']
     for d in range(dim):
         header_parts.append(f'z{d}')
@@ -441,9 +441,9 @@ def write_output(path, coords, periodic, ptilde, czar_grad, A, minpop, kT):
             row.append('nan')
         lines.append(' '.join(row))
 
-        # Blank line between z0-slices for gnuplot pm3d compatibility
+        
         if dim >= 2:
-            # Insert blank line when innermost index wraps
+            
             inner_idx = idx[1] if dim >= 2 else idx[0]
             if inner_idx == shape[1] - 1 and dim == 2:
                 lines.append('')
@@ -454,8 +454,8 @@ def write_output(path, coords, periodic, ptilde, czar_grad, A, minpop, kT):
         fh.write('\n'.join(lines) + '\n')
 
 
-# ─────────────────────── convergence time series ──────────────────────────────
-# ─────────────────────── 2-D weighted least-squares integration ───────────────
+
+
 
 def wls_integrate_2d(
     czar_grad,
@@ -468,26 +468,26 @@ def wls_integrate_2d(
     cg_tol=1e-10,
     cg_maxiter=20000,
 ):
-    """
-    Integrate a (possibly non-conservative) 2D gradient field to a scalar FEL A(x,y)
-    by solving the weighted least-squares problem:
+    
 
-        minimize_A  || W_x^(1/2) (D_x A - g_x) ||^2  +  || W_y^(1/2) (D_y A - g_y) ||^2
-                     + tikhonov * || L A ||^2
 
-    where weights are derived from ptilde (biased sampling density). This is the
-    "global" stabilizer: low-density frontier does not dominate the solution.
 
-    Parameters
-    ----------
-    czar_grad : ndarray, shape (nx, ny, 2)
-    coords    : [xgrid, ygrid]
-    periodic  : bool[2]
-    ptilde    : ndarray (nx, ny) or None
-    minpop    : mask threshold for weights (relative to max density)
-    weight_exp: exponent applied to edge weights (default 2)
-    tikhonov  : Laplacian regularization strength
-    """
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
     import numpy as _np
     from scipy import sparse as _sp
     from scipy.sparse.linalg import cg as _cg
@@ -500,7 +500,7 @@ def wls_integrate_2d(
     gx = czar_grad[..., 0].astype(_np.float64, copy=False)
     gy = czar_grad[..., 1].astype(_np.float64, copy=False)
 
-    # Node weights from ptilde (or uniform)
+    
     if ptilde is None:
         w_node = _np.ones((nx, ny), dtype=_np.float64)
     else:
@@ -508,7 +508,7 @@ def wls_integrate_2d(
         if pmax <= 0:
             w_node = _np.ones((nx, ny), dtype=_np.float64)
         else:
-            # Smooth weight in [0,1] that decays near the frontier
+            
             p_thresh = minpop * pmax
             w_node = ptilde / (ptilde + p_thresh + 1e-300)
 
@@ -517,7 +517,7 @@ def wls_integrate_2d(
 
     N = nx * ny
 
-    # ---- X edges ----
+    
     if periodic[0]:
         n_xe = nx * ny
         ie = _np.repeat(_np.arange(nx), ny)
@@ -543,7 +543,7 @@ def wls_integrate_2d(
     wx_flat = _np.power(wx, weight_exp).astype(_np.float64, copy=False)
     fx_flat = fx.astype(_np.float64, copy=False)
 
-    # ---- Y edges ----
+    
     if periodic[1]:
         n_ye = nx * ny
         iy = _np.repeat(_np.arange(nx), ny)
@@ -575,7 +575,7 @@ def wls_integrate_2d(
     LHS = Dx.T @ Wx @ Dx + Dy.T @ Wy @ Dy
     RHS = Dx.T @ (wx_flat * fx_flat) + Dy.T @ (wy_flat * fy_flat)
 
-    # Regularization: discrete Laplacian squared (helps when curl/noise present)
+    
     if tikhonov > 0:
         rows_L, cols_L, vals_L = [], [], []
         diag_main = _np.zeros(N, dtype=_np.float64)
@@ -583,7 +583,7 @@ def wls_integrate_2d(
         for i in range(nx):
             for j in range(ny):
                 k = idx(i, j)
-                # neighbors with periodic wrapping if enabled, else only in-bounds
+                
                 neigh = []
                 if periodic[0] or i > 0:      neigh.append(((i - 1) % nx, j, 1.0/dx**2))
                 if periodic[0] or i < nx - 1: neigh.append(((i + 1) % nx, j, 1.0/dx**2))
@@ -603,7 +603,7 @@ def wls_integrate_2d(
         )
         LHS = LHS + tikhonov * (Lap.T @ Lap)
 
-    # Gauge fix: pin the max-density node
+    
     pin = int(_np.argmax(w_node.ravel()))
     pin_penalty = float(LHS.diagonal().max()) * 1e4
     LHS = LHS.tolil()
@@ -621,7 +621,7 @@ def wls_integrate_2d(
 
 
 def compute_fel(meta, kernels, args, coords, periodic):
-    """Run CZAR evaluation + integration, return (A, mask, ptilde)."""
+    
     kT = args.kT if args.kT is not None else meta['kT']
     ptilde, czar_grad = czar_on_grid(coords, periodic, kernels, kT,
                                       nsigma=args.nsigma, verbose=False)
@@ -642,30 +642,30 @@ def compute_fel(meta, kernels, args, coords, periodic):
             st = "converged" if info.get("cg_converged", False) else f"NOT converged (info={info.get('cg_info')})"
             print(f"[WLS] CG {st}", flush=True)
     else:
-        # Poisson integration (uses density tapering when nonperiodic dims present)
+        
         A = poisson_integrate(czar_grad, coords, periodic, ptilde=ptilde, minpop=args.minpop)
 
-    # Reliability mask
+    
     pmax = ptilde.max() if ptilde.max() > 0 else 1.0
     mask = ptilde >= args.minpop * pmax
     return A, mask, ptilde
 
 
 def rmsd_convergence(args, coords, periodic, A_ref, mask_ref):
-    """
-    Scan the directory of args.czar for snapshot files matching
-    czar_kernels_XXXXXXXX.dat (or the same stem with step suffix),
-    compute the FEL for each, and return sorted lists (steps, rmsds).
-    """
+    
+
+
+
+
     import glob, os, re
 
     czar_path = os.path.abspath(args.czar)
     czar_dir  = os.path.dirname(czar_path)
     czar_base = os.path.basename(czar_path)
 
-    # Derive the stem: strip trailing _XXXXXXXX or _XXXXXXXX.dat
-    # e.g. czar_kernels_00500000.dat  ->  czar_kernels
-    #      czar_kernels.dat            ->  czar_kernels  (ref has no step suffix)
+    
+    
+    
     stem_match = re.match(r'^(.+?)(_\d{8})?(\.\w+)?$', czar_base)
     stem = stem_match.group(1) if stem_match else czar_base.split('.')[0]
     ext  = stem_match.group(3) if stem_match and stem_match.group(3) else '.dat'
@@ -699,13 +699,13 @@ def rmsd_convergence(args, coords, periodic, A_ref, mask_ref):
 
         A_s, mask_s, _ = compute_fel(meta_s, kernels_s, args, coords, periodic)
 
-        # Common mask: both ref and snapshot must be sampled
+        
         common = mask_ref & mask_s
         if common.sum() < 4:
             print(f"  step {step:8d}: too few common grid points ({common.sum()}) — skipping")
             continue
 
-        # Align both to zero minimum over common region before RMSD
+        
         A_ref_al = A_ref.copy()
         A_s_al   = A_s.copy()
         A_ref_al -= A_ref_al[common].min()
@@ -719,7 +719,7 @@ def rmsd_convergence(args, coords, periodic, A_ref, mask_ref):
     return steps, rmsds
 
 
-# ─────────────────────── main ────────────────────────────────────────────────
+
 
 def main():
     parser = argparse.ArgumentParser(
@@ -770,12 +770,12 @@ def main():
     if 'kappa' in meta:
         print(f"  kappa:    {meta['kappa']}", flush=True)
 
-    # Build grid once — used for both reference FEL and all snapshot FELs
+    
     coords, periodic, gmin, gmax = build_grid(meta, args)
     print(f"  Grid: {args.grid} pts/dim  "
           f"min={gmin.tolist()}  max={gmax.tolist()}", flush=True)
 
-    # ── Reference FEL ────────────────────────────────────────────────────────
+    
     print("Evaluating reference CZAR gradient on grid ...", flush=True)
     ptilde, czar_grad = czar_on_grid(coords, periodic, kernels, kT,
                                       nsigma=args.nsigma, verbose=args.verbose)
@@ -803,18 +803,18 @@ def main():
     else:
         print("  WARNING: no grid points above minpop threshold.", flush=True)
 
-    # Write reference FEL output
+    
     print(f"Writing reference FEL to: {args.output}", flush=True)
     write_output(args.output, coords, periodic, ptilde, czar_grad, A_ref,
                  args.minpop, kT)
 
-    # ── Convergence time series ───────────────────────────────────────────────
+    
     if args.convergence:
         print(f"\nConvergence mode: scanning for snapshot files ...", flush=True)
         steps, rmsds = rmsd_convergence(args, coords, periodic, A_ref, mask_ref)
 
         if steps:
-            # Write convergence table
+            
             with open(args.conv_output, 'w') as fh:
                 fh.write(f'# CZAR FEL convergence vs reference: {args.czar}\n')
                 fh.write(f'# Grid: {args.grid} pts/dim  minpop={args.minpop}\n')
@@ -825,7 +825,7 @@ def main():
                     fh.write(f'{s:10d}  {r:.6f}\n')
             print(f"\nConvergence table written to: {args.conv_output}", flush=True)
 
-            # Plot if matplotlib available
+            
             try:
                 import matplotlib
                 matplotlib.use('Agg')
@@ -851,7 +851,7 @@ def main():
 
     print("Done.", flush=True)
 
-    # ── Summary plots ─────────────────────────────────────────────────────────
+    
     try:
         import matplotlib
         matplotlib.use('Agg')
@@ -885,14 +885,14 @@ def main():
             levels_A = np.linspace(0, vmax_A, 24)
             cmap_A = 'viridis'
 
-            # ── Curl of the CZAR gradient field: dF1/dz0 - dF0/dz1 ──────────
-            # F0 = czar_grad[...,0] along z0-axis (axis 0)
-            # F1 = czar_grad[...,1] along z1-axis (axis 1)
-            # Numerical central differences; periodic wrap for periodic dims
-            F0 = czar_grad[..., 0]   # shape (N0, N1)
+            
+            
+            
+            
+            F0 = czar_grad[..., 0]   
             F1 = czar_grad[..., 1]
             per = meta.get('periodic', np.zeros(2, dtype=bool))
-            # Check each axis independently — mixed periodicity is valid
+            
             if per[0]:
                 dF1_dz0 = (np.roll(F1, -1, axis=0) - np.roll(F1, +1, axis=0)) / (2*dx0)
             else:
@@ -901,14 +901,14 @@ def main():
                 dF0_dz1 = (np.roll(F0, -1, axis=1) - np.roll(F0, +1, axis=1)) / (2*dx1)
             else:
                 dF0_dz1 = np.gradient(F0, dx1, axis=1)
-            curl = dF1_dz0 - dF0_dz1      # should be ~0 for an integrable field
+            curl = dF1_dz0 - dF0_dz1      
             curl_masked = np.where(mask_ref, curl, np.nan)
-            # Normalise by kT so the scale is dimensionless
+            
             curl_norm = curl_masked / kT
             curl_abs_95 = float(np.nanpercentile(np.abs(curl_norm[np.isfinite(curl_norm)]), 95))
             clim_curl = max(curl_abs_95, 0.01)
 
-            # Global curl RMS over sampled region (a convergence metric)
+            
             curl_rms = float(np.sqrt(np.nanmean(curl_masked[mask_ref]**2))) if mask_ref.any() else np.nan
             curl_rms_norm = curl_rms / kT
             print(f"  Curl RMS = {curl_rms:.4f} kJ/mol/rad^2  "
@@ -917,15 +917,15 @@ def main():
                 print(f"  WARNING: large curl residual suggests the force field "
                       f"is not yet integrable -- FEL may have path-dependent errors.", flush=True)
 
-            # ── Mean force magnitude ──────────────────────────────────────────
+            
             grad_mag = np.sqrt(czar_grad[...,0]**2 + czar_grad[...,1]**2)
             grad_mag_masked = np.where(mask_ref, grad_mag, np.nan)
 
-            # ── 4-panel figure ────────────────────────────────────────────────
+            
             fig, axes = plt.subplots(2, 2, figsize=(13, 11))
             fig.suptitle('CZAR FEL Analysis', fontsize=14)
 
-            # (0,0) FEL
+            
             ax = axes[0,0]
             cs = ax.contourf(c1, c0, A_plot, levels=levels_A, cmap=cmap_A, extend='max')
             ax.contour(c1, c0, A_plot, levels=levels_A[::4],
@@ -934,7 +934,7 @@ def main():
             ax.set_xlabel(f'z1 (rad)'); ax.set_ylabel(f'z0 (rad)')
             ax.set_title('Free Energy Surface')
 
-            # (0,1) Biased density log10(ptilde)
+            
             ax = axes[0,1]
             ld = np.log10(ptilde + 1e-300)
             ld_masked = np.where(mask_ref, ld, np.nan)
@@ -943,19 +943,19 @@ def main():
             ax.set_xlabel(f'z1 (rad)'); ax.set_ylabel(f'z0 (rad)')
             ax.set_title('Biased sampling density log10(ptilde)')
 
-            # (1,0) Mean force magnitude |grad A|
+            
             ax = axes[1,0]
             gmax = float(np.nanpercentile(grad_mag_masked[np.isfinite(grad_mag_masked)], 95))
             cs3 = ax.contourf(c1, c0, grad_mag_masked,
                               levels=np.linspace(0, gmax, 20), cmap='hot_r', extend='max')
-            # Overlay FEL contours for context
+            
             ax.contour(c1, c0, A_plot, levels=levels_A[::4],
                        colors='white', linewidths=0.4, alpha=0.5)
             plt.colorbar(cs3, ax=ax, label='|grad A| (kJ/mol/rad)')
             ax.set_xlabel(f'z1 (rad)'); ax.set_ylabel(f'z0 (rad)')
             ax.set_title('Mean force magnitude |dA/dz|')
 
-            # (1,1) Curl residual (normalised by kT)
+            
             ax = axes[1,1]
             cs4 = ax.contourf(c1, c0, curl_norm,
                               levels=np.linspace(-clim_curl, clim_curl, 24),
@@ -966,7 +966,7 @@ def main():
             ax.set_xlabel(f'z1 (rad)'); ax.set_ylabel(f'z0 (rad)')
             ax.set_title(f'Curl residual / kT  (RMS={curl_rms_norm:.3f})')
 
-            # Mark regions outside mask
+            
             for axi in axes.flat:
                 axi.contour(c1, c0, mask_ref.astype(float),
                             levels=[0.5], colors=['grey'], linewidths=0.8,

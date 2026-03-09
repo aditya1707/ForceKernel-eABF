@@ -1,29 +1,29 @@
-/*
- * czar_integrate.cpp
- * ==================
- * Standalone C++ tool to recover the PMF A(z) from FKERNELABF CZAR kernel files.
- *
- * Reads the z-kernel file, evaluates the CZAR gradient on a regular grid
- * (Nadaraya-Watson regression + finite-difference log-density correction),
- * then integrates using abf_integrate's metadynamics-style MC random walk.
- *
- * No PLUMED dependency — compiles with any C++11 compiler:
- *   g++ -O2 -o czar_integrate czar_integrate.cpp -lm
- *
- * Usage:
- *   ./czar_integrate <czar_kernels_file> [options]
- *
- * Options:
- *   -g <grid_pts>      Grid points per dimension (default: 100)
- *   -s <nsigma>        Kernel cutoff in sigma units (default: 4.0)
- *   -n <mc_steps>      MC steps (0 = auto-converge, default: 0)
- *   -t <mc_temp>       MC temperature in kT units (default: uses kT from file)
- *   -h <hill>          Initial hill height (default: 0.01)
- *   -f <hill_factor>   Hill reduction factor (default: 0.5)
- *   -m <minpop>        Minimum density fraction for allowed region (default: 1e-3)
- *   -o <output_file>   Output file (default: FEL_czar.dat)
- *   -v                 Verbose output
- */
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 
 #include <cstdio>
 #include <cstdlib>
@@ -39,7 +39,7 @@
 #include <dirent.h>
 #include <sys/stat.h>
 
-// ─────────────────────── data structures ────────────────────────────────────
+
 
 struct Kernel {
     double Nk;
@@ -56,7 +56,7 @@ struct Meta {
     std::vector<double> domMin, domMax;
 };
 
-// ─────────────────────── file reader ────────────────────────────────────────
+
 
 bool parse_czar_file(const char *path, Meta &meta, std::vector<Kernel> &kernels) {
     std::ifstream fh(path);
@@ -96,12 +96,12 @@ bool parse_czar_file(const char *path, Meta &meta, std::vector<Kernel> &kernels)
             meta.domMax.resize(meta.dim);
             for (int i = 0; i < meta.dim; i++) iss >> meta.domMax[i];
         } else if (key == "nkernels") {
-            // informational; we count from data lines
+            
         } else {
-            // Data line: Nk center[0..d-1] mu[0..d-1] sigma[0..d-1]
+            
             if (meta.dim == 0) continue;
             std::vector<double> vals;
-            // key is already the first number
+            
             vals.push_back(std::atof(key.c_str()));
             double v;
             while (iss >> v) vals.push_back(v);
@@ -132,23 +132,23 @@ bool parse_czar_file(const char *path, Meta &meta, std::vector<Kernel> &kernels)
     return true;
 }
 
-// ─────────────────────── grid helpers ───────────────────────────────────────
+
 
 static inline double periodic_delta(double delta, double period) {
     return delta - period * std::round(delta / period);
 }
 
-// ─────────────────────── CZAR gradient evaluation ──────────────────────────
+
 
 void czar_on_grid(
     const Meta &meta,
     const std::vector<Kernel> &kernels,
     int grid_pts,
     double nsigma,
-    // outputs (pre-allocated):
-    std::vector<double> &ptilde,         // [gridTotal]
-    std::vector<double> &czar_grad,      // [gridTotal * dim]
-    // grid info (filled by this function):
+    
+    std::vector<double> &ptilde,         
+    std::vector<double> &czar_grad,      
+    
     std::vector<int> &sizes,
     std::vector<double> &gmin,
     std::vector<double> &gmax,
@@ -172,34 +172,34 @@ void czar_on_grid(
         gridTotal *= sizes[d];
     }
 
-    // Period array
+    
     std::vector<double> period(dim, 0.0);
     for (int d = 0; d < dim; d++)
         if (meta.periodic[d]) period[d] = gmax[d] - gmin[d];
 
-    // Allocate
+    
     ptilde.assign(gridTotal, 0.0);
     std::vector<double> sum_wkmu(gridTotal * dim, 0.0);
     czar_grad.assign(gridTotal * dim, 0.0);
 
-    // Strides for flat indexing
+    
     std::vector<int> strides(dim);
     strides[dim-1] = 1;
     for (int d = dim-2; d >= 0; d--) strides[d] = strides[d+1] * sizes[d+1];
 
-    // Helper: multi-index to flat
+    
     auto multi_to_flat = [&](const std::vector<int> &idx) -> int {
         int off = 0;
         for (int d = 0; d < dim; d++) off += idx[d] * strides[d];
         return off;
     };
 
-    // Helper: grid coordinate
+    
     auto grid_coord = [&](int d, int i) -> double {
         return gmin[d] + i * dx[d];
     };
 
-    // ── Kernel loop: accumulate ptilde and NW numerator ─────────────────────
+    
     int nk = (int)kernels.size();
     int report_every = std::max(1, nk / 10);
 
@@ -209,7 +209,7 @@ void czar_on_grid(
 
         const Kernel &kern = kernels[ki];
 
-        // Per-dimension index range (box cutoff)
+        
         std::vector<int> lo_idx(dim), hi_idx(dim);
         bool skip = false;
         for (int d = 0; d < dim; d++) {
@@ -225,8 +225,8 @@ void czar_on_grid(
         }
         if (skip) continue;
 
-        // Iterate over the box
-        // For simplicity, support 1D, 2D, 3D explicitly
+        
+        
         std::vector<int> idx(dim);
         for (idx[0] = lo_idx[0]; idx[0] <= hi_idx[0]; idx[0]++) {
             int id0 = meta.periodic[0] ? ((idx[0] % sizes[0]) + sizes[0]) % sizes[0] : idx[0];
@@ -263,7 +263,7 @@ void czar_on_grid(
                         sum_wkmu[g * dim + 0] += wk * kern.mu[0];
                         sum_wkmu[g * dim + 1] += wk * kern.mu[1];
                     } else {
-                        // dim == 3
+                        
                         for (idx[2] = lo_idx[2]; idx[2] <= hi_idx[2]; idx[2]++) {
                             int id2 = meta.periodic[2] ? ((idx[2] % sizes[2]) + sizes[2]) % sizes[2] : idx[2];
                             double z2 = grid_coord(2, id2);
@@ -288,7 +288,7 @@ void czar_on_grid(
         }
     }
 
-    // ── NW mean force ───────────────────────────────────────────────────────
+    
     std::vector<double> mu_NW(gridTotal * dim, 0.0);
     for (int g = 0; g < gridTotal; g++) {
         if (ptilde[g] > 0) {
@@ -297,8 +297,8 @@ void czar_on_grid(
         }
     }
 
-    // ── FD gradient of ln(ptilde) ───────────────────────────────────────────
-    // Matches DRR's getCountsLogDerivative: FD of ln(count)
+    
+    
     double pmax = *std::max_element(ptilde.begin(), ptilde.end());
     double pfloor = std::max(pmax * 1e-18, 1e-300);
     std::vector<double> ln_p(gridTotal);
@@ -307,7 +307,7 @@ void czar_on_grid(
 
     std::vector<double> grad_ln_p(gridTotal * dim, 0.0);
 
-    // Compute FD per dimension using strides
+    
     for (int d = 0; d < dim; d++) {
         int stride_d = strides[d];
         int N_d = sizes[d];
@@ -316,7 +316,7 @@ void czar_on_grid(
         for (int g = 0; g < gridTotal; g++) {
             if (ptilde[g] <= 0) continue;
 
-            // Compute index along dimension d
+            
             int idx_d = (g / stride_d) % N_d;
 
             if (meta.periodic[d]) {
@@ -325,7 +325,7 @@ void czar_on_grid(
                 grad_ln_p[g * dim + d] = (ln_p[g_next] - ln_p[g_prev]) / (2.0 * h);
             } else if (idx_d == 0) {
                 if (N_d >= 3) {
-                    // 2nd-order forward: (-3f0 + 4f1 - f2) / (2h)
+                    
                     grad_ln_p[g * dim + d] = (-3.0 * ln_p[g] + 4.0 * ln_p[g + stride_d]
                                               - ln_p[g + 2 * stride_d]) / (2.0 * h);
                 } else {
@@ -333,29 +333,29 @@ void czar_on_grid(
                 }
             } else if (idx_d == N_d - 1) {
                 if (N_d >= 3) {
-                    // 2nd-order backward: (3fN - 4fN1 + fN2) / (2h)
+                    
                     grad_ln_p[g * dim + d] = (3.0 * ln_p[g] - 4.0 * ln_p[g - stride_d]
                                               + ln_p[g - 2 * stride_d]) / (2.0 * h);
                 } else {
                     grad_ln_p[g * dim + d] = (ln_p[g] - ln_p[g - stride_d]) / h;
                 }
             } else {
-                // Central difference
+                
                 grad_ln_p[g * dim + d] = (ln_p[g + stride_d] - ln_p[g - stride_d]) / (2.0 * h);
             }
         }
     }
 
-    // ── Assemble CZAR gradient ──────────────────────────────────────────────
-    // dA/dz_i = -mu_NW_i - kT * d/dz_i ln(ptilde)
-    // (confirmed from DRR CZAR::getGradient)
+    
+    
+    
     for (int g = 0; g < gridTotal; g++) {
         for (int d = 0; d < dim; d++) {
             czar_grad[g * dim + d] = -mu_NW[g * dim + d] - meta.kT * grad_ln_p[g * dim + d];
         }
     }
 
-    // ── Build allowed mask ──────────────────────────────────────────────────
+    
     double pop_thresh = minpop * pmax;
     allowed_out.resize(gridTotal);
     for (int g = 0; g < gridTotal; g++)
@@ -372,10 +372,10 @@ void czar_on_grid(
     }
 }
 
-// ─────────────────────── MC integration (from abf_integrate) ───────────────
+
 
 void mc_integrate(
-    const std::vector<double> &grad,   // [gridTotal * dim]
+    const std::vector<double> &grad,   
     const std::vector<bool> &allowed,
     const std::vector<int> &sizes,
     const std::vector<double> &dx,
@@ -385,14 +385,14 @@ void mc_integrate(
     double hill_init,
     double hill_factor,
     bool verbose,
-    // output:
+    
     std::vector<double> &A)
 {
     const int dim = (int)sizes.size();
     int gridTotal = 1;
     for (int d = 0; d < dim; d++) gridTotal *= sizes[d];
 
-    // Strides
+    
     std::vector<int> strides(dim);
     strides[dim-1] = 1;
     for (int d = dim-2; d >= 0; d--) strides[d] = strides[d+1] * sizes[d+1];
@@ -405,7 +405,7 @@ void mc_integrate(
     std::vector<double> bias(gridTotal, 0.0);
     std::vector<unsigned long> histogram(gridTotal, 0);
 
-    // Build allowed list
+    
     std::vector<int> allowed_list;
     for (int g = 0; g < gridTotal; g++)
         if (allowed[g]) allowed_list.push_back(g);
@@ -418,7 +418,7 @@ void mc_integrate(
 
     srand(time(NULL));
 
-    // Flat to multi-index
+    
     auto flat_to_multi = [&](int off, std::vector<int> &idx) {
         for (int d = dim-1; d >= 0; d--) {
             idx[d] = off % sizes[d];
@@ -431,21 +431,21 @@ void mc_integrate(
         return off;
     };
 
-    // Pick random allowed starting position
+    
     std::vector<int> pos(dim);
     {
         int start = allowed_list[rand() % allowed_list.size()];
         flat_to_multi(start, pos);
     }
 
-    // Convergence settings
+    
     unsigned int nsteps = nsteps_in;
     unsigned int out_freq, scale_hill_step;
     bool converged;
     if (nsteps > 0) {
         out_freq = std::max(1u, nsteps / 10);
         scale_hill_step = nsteps / 2;
-        converged = true; // will run exactly nsteps
+        converged = true; 
     } else {
         out_freq = 1000000;
         scale_hill_step = 2000 * (unsigned int)gridTotal;
@@ -454,7 +454,7 @@ void mc_integrate(
         if (verbose) printf("  MC auto-converge: min steps = %u\n", nsteps);
     }
 
-    // ── Compute RMSD (deviation between input grad and FD of bias) ──────────
+    
     auto compute_rmsd = [&]() -> double {
         double rmsd_sum = 0.0;
         unsigned int norm = 0;
@@ -465,7 +465,7 @@ void mc_integrate(
             for (int d = 0; d < dim; d++) {
                 double est = 0.0;
                 int c = 0;
-                // Backward neighbor
+                
                 np2 = p;
                 np2[d] = p[d] - 1;
                 if (periodic[d]) {
@@ -482,7 +482,7 @@ void mc_integrate(
                         c++;
                     }
                 }
-                // Forward neighbor
+                
                 np2 = p;
                 np2[d] = p[d] + 1;
                 if (periodic[d]) {
@@ -511,7 +511,7 @@ void mc_integrate(
     double rmsd = compute_rmsd();
     if (verbose) printf("  MC initial gradient RMSD: %.6f\n", rmsd);
 
-    // ── Main MC loop ────────────────────────────────────────────────────────
+    
     unsigned long total = 0;
     std::vector<int> newpos(dim);
 
@@ -544,7 +544,7 @@ void mc_integrate(
 
         const double *grad_here = &grad[offset * dim];
 
-        // Propose move
+        
         int not_accepted = 1;
         while (not_accepted) {
             total++;
@@ -585,7 +585,7 @@ void mc_integrate(
     printf("  MC integration: %u steps, %lu proposals, acceptance=%.3f, final RMSD=%.6f\n",
            nsteps, total, acceptance, final_rmsd);
 
-    // PMF = -bias (bias fills wells, converges to -A + const)
+    
     A.resize(gridTotal);
     double amin = 1e30;
     for (int g = 0; g < gridTotal; g++) {
@@ -595,7 +595,7 @@ void mc_integrate(
     for (int g = 0; g < gridTotal; g++) A[g] -= amin;
 }
 
-// ─────────────────────── output writer ──────────────────────────────────────
+
 
 void write_output(const char *path,
                   const Meta &meta,
@@ -622,36 +622,36 @@ void write_output(const char *path,
 
     std::vector<int> idx(dim);
     for (int g = 0; g < gridTotal; g++) {
-        // Compute multi-index
+        
         int tmp = g;
         for (int d = dim-1; d >= 0; d--) {
             idx[d] = tmp % sizes[d];
             tmp /= sizes[d];
         }
 
-        // Coordinates
+        
         for (int d = 0; d < dim; d++)
             fprintf(f, " %.8f", gmin[d] + idx[d] * dx[d]);
-        // Gradient
+        
         for (int d = 0; d < dim; d++)
             fprintf(f, " %.8f", czar_grad[g * dim + d]);
-        // Density
+        
         fprintf(f, " %.8f", ptilde[g]);
-        // PMF
+        
         if (allowed[g])
             fprintf(f, " %.8f", A[g]);
         else
             fprintf(f, " nan");
         fprintf(f, "\n");
 
-        // Blank line between z0 slices (for gnuplot pm3d)
+        
         if (dim >= 2 && idx[dim-1] == sizes[dim-1] - 1)
             fprintf(f, "\n");
     }
     fclose(f);
 }
 
-// ─────────────────── simple FEL writer (z0 z1 ... A) ────────────────────────
+
 
 void write_simple_fel(const char *path,
                       int dim,
@@ -667,7 +667,7 @@ void write_simple_fel(const char *path,
     int gridTotal = 1;
     for (int d = 0; d < dim; d++) gridTotal *= sizes[d];
 
-    // Shift so minimum over allowed region = 0
+    
     double amin = 1e30;
     for (int g = 0; g < gridTotal; g++)
         if (allowed[g] && A[g] < amin) amin = A[g];
@@ -697,9 +697,9 @@ void write_simple_fel(const char *path,
     fclose(f);
 }
 
-// ─────────────────── snapshot discovery ──────────────────────────────────────
 
-// Extract directory and basename from a path
+
+
 static void split_path(const std::string &path, std::string &dir, std::string &base) {
     size_t pos = path.find_last_of("/\\");
     if (pos == std::string::npos) {
@@ -711,17 +711,17 @@ static void split_path(const std::string &path, std::string &dir, std::string &b
     }
 }
 
-// Find the stem and extension: "fk.czar_kernels_01000000.dat" -> stem="fk.czar_kernels", ext=".dat"
-// Also works without a step suffix: "fk.czar_kernels.dat" -> same stem
+
+
 static void parse_stem_ext(const std::string &base, std::string &stem, std::string &ext) {
-    // Find last '.'
+    
     size_t dot = base.rfind('.');
     if (dot == std::string::npos) {
         stem = base; ext = "";
     } else {
         ext = base.substr(dot);
         std::string noext = base.substr(0, dot);
-        // Strip trailing _XXXXXXXX if present
+        
         if (noext.size() >= 9 && noext[noext.size()-9] == '_') {
             bool all_digits = true;
             for (int i = 0; i < 8; i++)
@@ -733,7 +733,7 @@ static void parse_stem_ext(const std::string &base, std::string &stem, std::stri
     }
 }
 
-// Scan directory for files matching stem_XXXXXXXX.ext, return sorted list
+
 static std::vector<std::string> find_snapshots(const std::string &dir,
                                                 const std::string &stem,
                                                 const std::string &ext)
@@ -751,7 +751,7 @@ static std::vector<std::string> find_snapshots(const std::string &dir,
         if (fname.size() != expect_len) continue;
         if (fname.substr(0, prefix.size()) != prefix) continue;
         if (fname.substr(fname.size() - ext.size()) != ext) continue;
-        // Check 8 digits
+        
         bool ok = true;
         for (int i = 0; i < 8; i++)
             if (!isdigit(fname[prefix.size() + i])) { ok = false; break; }
@@ -763,16 +763,16 @@ static std::vector<std::string> find_snapshots(const std::string &dir,
     return results;
 }
 
-// Extract step number from a snapshot path
+
 static long extract_step(const std::string &path, const std::string &ext) {
-    // Find _XXXXXXXX before ext
+    
     size_t epos = path.size() - ext.size();
     if (epos < 9) return -1;
     std::string digits = path.substr(epos - 8, 8);
     return std::atol(digits.c_str());
 }
 
-// ─────────────────── batch processing ───────────────────────────────────────
+
 
 void process_all_snapshots(const char *reference_path,
                            int grid_pts, double nsigma, double minpop,
@@ -794,7 +794,7 @@ void process_all_snapshots(const char *reference_path,
     }
     printf("  Found %d snapshots\n", (int)snapshots.size());
 
-    // Create output directory
+    
     std::string outdir = fel_dir ? std::string(fel_dir) : dir;
     mkdir(outdir.c_str(), 0755);
 
@@ -804,7 +804,7 @@ void process_all_snapshots(const char *reference_path,
         const std::string &fpath = snapshots[si];
         long step = extract_step(fpath, ext);
 
-        // Parse kernel file
+        
         Meta meta;
         std::vector<Kernel> kernels;
         if (!parse_czar_file(fpath.c_str(), meta, kernels)) {
@@ -817,7 +817,7 @@ void process_all_snapshots(const char *reference_path,
                (int)(si+1), (int)snapshots.size(), step, (int)kernels.size());
         fflush(stdout);
 
-        // Evaluate CZAR gradient
+        
         std::vector<double> ptilde, czar_grad;
         std::vector<int> sizes;
         std::vector<double> gmin, gmax, dx;
@@ -825,12 +825,12 @@ void process_all_snapshots(const char *reference_path,
         czar_on_grid(meta, kernels, grid_pts, nsigma,
                      ptilde, czar_grad, sizes, gmin, gmax, dx, allowed, minpop, false);
 
-        // MC integrate
+        
         std::vector<double> A;
         mc_integrate(czar_grad, allowed, sizes, dx, meta.periodic, meta.kT,
                      mc_steps, mc_hill, mc_hill_factor, false, A);
 
-        // Write simple FEL
+        
         char outname[256];
         snprintf(outname, sizeof(outname), "%s/FEL_%08ld.dat", outdir.c_str(), step);
         write_simple_fel(outname, meta.dim, sizes, gmin, dx, A, allowed);
@@ -841,10 +841,10 @@ void process_all_snapshots(const char *reference_path,
     printf("\nDone. %d FEL files written to %s/\n", (int)snapshots.size(), outdir.c_str());
 }
 
-// ─────────────────────── main ──────────────────────────────────────────────
+
 
 int main(int argc, char *argv[]) {
-    // Defaults
+    
     int grid_pts = 100;
     double nsigma = 4.0;
     unsigned int mc_steps = 0;
@@ -858,7 +858,7 @@ int main(int argc, char *argv[]) {
     bool process_all = false;
     const char *input = NULL;
 
-    // Parse command line
+    
     for (int i = 1; i < argc; i++) {
         if (argv[i][0] == '-') {
             switch (argv[i][1]) {
@@ -900,7 +900,7 @@ int main(int argc, char *argv[]) {
         return 1;
     }
 
-    // ── Batch mode ──────────────────────────────────────────────────────────
+    
     if (process_all) {
         process_all_snapshots(input, grid_pts, nsigma, minpop,
                               mc_steps, mc_hill, mc_hill_factor,
@@ -908,9 +908,9 @@ int main(int argc, char *argv[]) {
         return 0;
     }
 
-    // ── Single file mode ────────────────────────────────────────────────────
+    
 
-    // Read kernels
+    
     Meta meta;
     std::vector<Kernel> kernels;
     printf("Reading CZAR kernels from: %s\n", input);
@@ -923,7 +923,7 @@ int main(int argc, char *argv[]) {
     for (int d = 0; d < meta.dim; d++) printf("%s%s", d?",":"", meta.periodic[d]?"true":"false");
     printf("\n");
 
-    // Evaluate CZAR gradient on grid
+    
     std::vector<double> ptilde, czar_grad;
     std::vector<int> sizes;
     std::vector<double> gmin, gmax, dx;
@@ -933,13 +933,13 @@ int main(int argc, char *argv[]) {
     czar_on_grid(meta, kernels, grid_pts, nsigma,
                  ptilde, czar_grad, sizes, gmin, gmax, dx, allowed, minpop, verbose);
 
-    // Integrate
+    
     std::vector<double> A;
     printf("Integrating via MC ...\n");
     mc_integrate(czar_grad, allowed, sizes, dx, meta.periodic, meta.kT,
                  mc_steps, mc_hill, mc_hill_factor, verbose, A);
 
-    // Write output
+    
     printf("Writing FEL to: %s\n", output);
     write_output(output, meta, sizes, gmin, dx, ptilde, czar_grad, A, allowed);
 
