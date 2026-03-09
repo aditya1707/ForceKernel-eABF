@@ -1,3 +1,0 @@
-./czar_integrate fk.czar_kernels_05000000.dat -a -h 0.1 -d FEL_snapshots/
-plumed dependency required
-plumed pesmd < pesmd.in
