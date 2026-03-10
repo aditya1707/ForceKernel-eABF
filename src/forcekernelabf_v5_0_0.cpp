@@ -12,6 +12,7 @@
 #include <iomanip>
 #include <random>
 #include <cstdio>
+#include <cassert>
 
 #ifndef M_PI
 #define M_PI 3.14159265358979323846
@@ -25,7 +26,7 @@ class ForceKernelABF : public Bias {
 private:
   unsigned dim_;
 
-  
+  // --- internal extended Lagrangian ---
   std::vector<double> kappa_;
   std::vector<double> mass_;
   double friction_;
@@ -33,63 +34,64 @@ private:
   std::vector<double> s_fict_;
   std::vector<double> v_fict_;
   bool firstStep_;
-  
+  // adaptive sigma warmup (active when SIGMA not user-supplied)
   bool adaptiveSigma_;
   unsigned adaptiveSigmaStride_;
   unsigned adaptiveCounter_;
-  std::vector<double> av_cv_;  
-  std::vector<double> av_M2_;  
+  std::vector<double> av_cv_;  // Welford running mean of z
+  std::vector<double> av_M2_;  // Welford running sum of squared deviations
   std::mt19937 rng_;
   std::normal_distribution<double> gauss_;
 
-  
+  // --- kernel / ABF parameters ---
   unsigned pace_;
-  double thresh_;     
-  double nsigmaCut_;  
-  
-  
-  
-  
-  
-  
-  
-  
+  double thresh_;     // compression threshold (default 1.0)
+  double nsigmaCut_;  // kernel cutoff in sigma (default 4.0)
+  // biasFactor_ (γ) controls the density-based exploration force on λ.
+  // γ = 1: pure ABF, no exploration force.
+  // γ > 1: F_ex = −c·∇Z/(Z₀+Z) where c=kT(γ−1), Z is the NW denominator
+  //   interpolated from Zgrid_, and Z₀=median(Z) on the grid.  The force
+  //   pushes λ away from well-sampled basins toward under-sampled regions.
+  //   Both Z and F_ex are updated at GRIDPACE intervals, synchronized with
+  //   the ABF mean force.
+  // The CZAR estimator on z is completely unaffected.
   double biasFactor_;
-  double Z0_density_;   
-  double muxClamp_;   
-  double maxForce_;   
+  double Z0_density_;   // median-Z reference for density-based exploration
+  double muxClamp_;   // per-kernel force clamp (default 500)
+  double maxForce_;   // grid bias force clamp  (default 500)
   std::vector<double> sigma0_;
   std::vector<double> sigmaMin_;
   bool fixedSigma_;
+  bool hasMin_;    // cached !sigmaMin_.empty(); avoids repeated .size() checks
 
-  
+  // -- lambda-kernels (bias driving, indexed at s_fict) --------------------------
   struct Kernel {
     std::vector<double> center;
-    std::vector<double> mu;      
+    std::vector<double> mu;      // mean force estimate (clamped, exact running mean)
     std::vector<double> sigma;
     double Nk;
   };
   std::vector<Kernel> kernels_;
   unsigned M_;
   double totalN_;
-  double sumNk2_;   
+  double sumNk2_;   // sum of Nk^2; neff = totalN_^2 / sumNk2_
 
-  
-  
-  
-  
+  // -- z-kernels (CZAR estimator, indexed at real CV z) -------------------------
+  // Centers track the real collective variable (not the fictitious lambda).
+  // mu stores the unclamped mean spring force kappa*(z - lambda).
+  // Always uses the exact running mean.
   struct ZKernel {
-    std::vector<double> center;  
-    std::vector<double> mu;      
+    std::vector<double> center;  // position in real CV space
+    std::vector<double> mu;      // unclamped mean of kappa(z - lambda)
     std::vector<double> sigma;
     double Nk;
   };
   std::vector<ZKernel> zKernels_;
   unsigned zM_;
   double zTotalN_;
-  double zSumNk2_;  
+  double zSumNk2_;  // sum of zNk^2 for z-kernel neff
 
-  
+  // --- neighbor list (for lambda-kernels only) ---
   bool nlist_;
   double nlistCutFactor_;
   double nlistSkinFactor_;
@@ -98,62 +100,63 @@ private:
   std::vector<double> nlistDev2_;
   bool nlistUpdate_;
 
-  
+  // --- neighbor list (for z-kernels; accelerates geometric merge search) ---
   std::vector<unsigned> znlistIdx_;
   std::vector<double> znlistCenter_;
   std::vector<double> znlistDev2_;
   bool znlistUpdate_;
 
-  
+  // --- grid ---
   std::vector<unsigned> gridN_;
   unsigned gridPace_, gridTotal_;
   unsigned gridSize_;
   std::vector<double> gridMin_, gridMax_, gridDx_;
-  std::vector<double> ghat_;   
-  std::vector<double> Zgrid_;  
-  std::vector<double> fex_;    
+  std::vector<double> ghat_;   // NW mean force grid [gridTotal_ * dim_], for direct ABF force
+  std::vector<double> Zgrid_;  // NW denominator on grid [gridTotal_], for exploration + Neff
+  std::vector<double> fex_;    // exploration force on grid [gridTotal_ * dim_], zero when γ=1
 
-  
-  
-  
-  
+  // --- lambda-grid output (debug: NW mean force on λ grid) ---
+  // Filename derived from label: {label}.lambda_grid.dat
+  // Step-stamped on each write: {label}.lambda_grid_{step:08d}.dat
+  // Off by default; enabled by setting LAMBDAGRIDSTRIDE > 0.
   std::string lambdaGridFile_;
   unsigned lambdaGridStride_;
 
-  
+  // --- domain ---
   std::vector<double> domMin_, domMax_, domLen_;
   std::vector<bool> periodic_;
 
-  
-  
-  
+  // --- lambda-kernel dump ---
+  // Filename derived from label: {label}.kernels.dat
+  // Step-stamped on each write: {label}.kernels_{step:08d}.dat
   std::string kernelFile_;
   unsigned kernelStride_;
 
-  
-  
-  
+  // --- CZAR kernel file (z-kernels) ---
+  // Filename derived from label: {label}.czar_kernels.dat
+  // Step-stamped on each write: {label}.czar_kernels_{step:08d}.dat
   std::string czarFile_;
   unsigned czarStride_;
 
-  
-  
-  
-  
+  // --- restart state file ---
+  // Written at STATESTRIDE interval, read on RESTART.
+  // Contains: fictitious particle, kernel populations, sigma0, Z0_density.
+  // The mean-force grid is reconstructed immediately from kernels on RESTART
+  // (not deferred to the next GRIDPACE step) so the bias is live from step 1.
   std::string stateFile_;
   unsigned stateStride_;
 
-  
+  // --- state ---
   std::vector<std::string> fictNames_;
 
-  
+  // ================ helpers ================
   double sq(double x) const { return x * x; }
 
-  
-  
-  
-  
-  
+  // Lambda-side ABF always applies the full NW mean force from the grid.
+  // Density-based exploration (γ > 1) adds F_ex = −c·∇Z/(Z₀+Z) on top,
+  // also interpolated from the grid (synchronized at GRIDPACE intervals).
+  // Both the ABF cancellation force and the exploration force act on λ,
+  // leaving z and the CZAR estimator completely clean.
 
   double wrapToDomain(unsigned i, double x) const {
     if (!periodic_[i]) return x;
@@ -170,12 +173,12 @@ private:
     return d;
   }
 
-  
-  
-  
-  
-  
-  
+  // Silverman bandwidth for lambda-kernels.
+  // Uses M_ (compressed kernel count), NOT totalN_ (raw sample count).
+  // Silverman's n = number of distinct locations being represented.
+  // After compression that is M_; using totalN_ >> M_ causes the bandwidth
+  // to shrink as if you had far more data than you do, hitting SIGMA_MIN
+  // prematurely and fragmenting the representation.
   std::vector<double> currentSigma() const {
     std::vector<double> sig = sigma0_;
     if (!fixedSigma_ && M_ > 1) {
@@ -183,13 +186,14 @@ private:
       double s_rescaling = std::pow(neff*(dim_+2.0)/4.0, -1.0/(4.0+dim_));
       for (unsigned i = 0; i < dim_; ++i) {
         sig[i] *= s_rescaling;
-        if (sigmaMin_.size() > 0) sig[i] = std::max(sig[i], sigmaMin_[i]);
+        if (hasMin_) sig[i] = std::max(sig[i], sigmaMin_[i]);
       }
     }
     return sig;
   }
 
-  
+
+  // Silverman bandwidth for z-kernels -- same fix applied.
   std::vector<double> currentZSigma() const {
     std::vector<double> sig = sigma0_;
     if (!fixedSigma_ && zM_ > 1) {
@@ -197,7 +201,7 @@ private:
       double s_rescaling = std::pow(neff*(dim_+2.0)/4.0, -1.0/(4.0+dim_));
       for (unsigned i = 0; i < dim_; ++i) {
         sig[i] *= s_rescaling;
-        if (sigmaMin_.size() > 0) sig[i] = std::max(sig[i], sigmaMin_[i]);
+        if (hasMin_) sig[i] = std::max(sig[i], sigmaMin_[i]);
       }
     }
     return sig;
@@ -205,9 +209,9 @@ private:
 
   double dist2KernelNorm(const std::vector<double>& s, unsigned k,
                          const std::vector<double>& sig) const {
-    
-    
-    
+    // Merge distance normalized by the current global Silverman bandwidth.
+    // Using per-kernel sigma causes a positive feedback loop where shrinking
+    // sigma → tighter merge radius → more kernels → more shrinkage.
     double acc = 0.0;
     for (unsigned i = 0; i < dim_; ++i) {
       double d = s[i] - kernels_[k].center[i];
@@ -218,7 +222,7 @@ private:
     return acc;
   }
 
-  
+  // -- lambda-kernel merge search (purely geometric) ---------------------------
   int findMergeable(const std::vector<double>& s, int exclude = -1) {
     const std::vector<double> sig = currentSigma();
     double r2 = 0.25*sq(thresh_); int best = -1; double bestd2 = r2;
@@ -235,7 +239,7 @@ private:
     return best;
   }
 
-  
+  // -- z-kernel merge search (purely geometric, uses global Silverman sigma) --
   int findMergeableZ(const std::vector<double>& s, int exclude = -1) {
     const std::vector<double> sig = currentZSigma();
     double r2 = 0.25*sq(thresh_); int best = -1; double bestd2 = r2;
@@ -259,10 +263,10 @@ private:
     return best;
   }
 
-  
-  
-  
-  
+  // ================ neighbor list (lambda-kernels only) ================
+  // The broad-phase cutoff must use the same distance metric as findMergeable
+  // (global Silverman sigma), otherwise valid merge candidates can be excluded
+  // when per-kernel sigma differs from the global sigma.
   void updateNlist(const std::vector<double>& cv) {
     nlistCenter_ = cv;
     nlistIdx_.clear();
@@ -289,7 +293,6 @@ private:
       for (unsigned i = 0; i < dim_; ++i)
         nlistDev2_[i] /= nlistIdx_.size();
     } else {
-      std::vector<double> sig = currentSigma();
       for (unsigned i = 0; i < dim_; ++i) nlistDev2_[i] = sq(sig[i]);
     }
     nlistUpdate_ = false;
@@ -303,8 +306,8 @@ private:
     return false;
   }
 
-  
-  
+  // ================ neighbor list (z-kernels) ================
+  // Same global-sigma metric as findMergeableZ for consistent broad-phase filtering.
   void updateZNlist(const std::vector<double>& cv) {
     znlistCenter_ = cv;
     znlistIdx_.clear();
@@ -332,7 +335,6 @@ private:
       for (unsigned i = 0; i < dim_; ++i)
         znlistDev2_[i] /= (double)znlistIdx_.size();
     } else {
-      std::vector<double> sig = currentZSigma();
       for (unsigned i = 0; i < dim_; ++i) znlistDev2_[i] = sq(sig[i]);
     }
 
@@ -347,54 +349,130 @@ private:
     return false;
   }
 
-  
+  // ================ generic kernel-pool merge loop ================
+  // Shared implementation for both lambda-kernels and z-kernels.
+  // Starting from 'giver', repeatedly finds the nearest mergeable neighbor
+  // and fuses the pair (weighted parallel-variance merge) until no further
+  // merge candidates exist.
+  //
+  // Template parameters:
+  //   K        -- kernel type (Kernel or ZKernel)
+  //   FindFn   -- callable(center, exclude) -> int: returns index of nearest
+  //               mergeable neighbor, or -1 if none within threshold
+  //   MuFn     -- callable(mu_merged) -> double: post-merge mu transform
+  //               (clamping for lambda-kernels; identity for z-kernels)
+  //
+  // The giver kernel is removed by swap-with-last (O(1)); the nlist index
+  // array is patched in-place to keep it consistent.
+  template<typename K, typename FindFn, typename MuFn>
+  void mergeKernelPool(unsigned giver,
+                       std::vector<K>& kernels,
+                       unsigned& M,
+                       double& sumNk2,
+                       std::vector<unsigned>& nlistIdx,
+                       FindFn findMerge,
+                       MuFn muUpdate) {
+    const bool hasMin = !sigmaMin_.empty();
+    int taker = findMerge(kernels[giver].center, (int)giver);
+    while (taker >= 0) {
+      assert(M > 0);
+      assert(giver < kernels.size() && (unsigned)taker < kernels.size());
+
+      double Nt = kernels[taker].Nk, Ng = kernels[giver].Nk, Ntot = Nt + Ng;
+      assert(Ntot > 0.0);
+      sumNk2 -= (Nt*Nt + Ng*Ng);
+
+      const double inv = 1.0 / Ntot;
+      for (unsigned i = 0; i < dim_; ++i) {
+        double ct = kernels[taker].center[i];
+        double cg = kernels[giver].center[i];
+        if (periodic_[i] && domLen_[i] > 0)
+          cg = ct + periodicDelta(i, ct, cg);
+        double c_new = (Nt*ct + Ng*cg) * inv;
+        double dt = ct - c_new, dg = cg - c_new;
+        double var = (Nt*(sq(kernels[taker].sigma[i]) + sq(dt)) +
+                      Ng*(sq(kernels[giver].sigma[i]) + sq(dg))) * inv;
+        kernels[taker].center[i] = wrapToDomain(i, c_new);
+        kernels[taker].sigma[i] = std::sqrt(std::max(var,
+            sq(hasMin ? sigmaMin_[i] : 1e-6)));
+        double mu_new = (Nt*kernels[taker].mu[i] + Ng*kernels[giver].mu[i]) * inv;
+        kernels[taker].mu[i] = muUpdate(mu_new);
+      }
+      kernels[taker].Nk = Ntot;
+      sumNk2 += Ntot*Ntot;
+
+      // Swap giver with the last kernel to remove it in O(1).
+      // If taker was the last element, it moves into giver's slot — newGiver tracks this.
+      unsigned last = M - 1;
+      unsigned newGiver = (unsigned)taker;
+      if (giver != last && (unsigned)taker == last) newGiver = giver;
+      if (giver != last) kernels[giver] = std::move(kernels[last]);
+      kernels.resize(last);
+      --M;
+      if (nlist_) {
+        for (auto it = nlistIdx.begin(); it != nlistIdx.end(); ) {
+          if (*it == giver) { it = nlistIdx.erase(it); }
+          else {
+            if (*it == last) *it = giver;
+            ++it;
+          }
+        }
+      }
+      giver = newGiver;
+      taker = findMerge(kernels[giver].center, (int)giver);
+    }
+  }
+
+
+  // ================ lambda-kernel compression (bias driving) ================
   void addSample(const std::vector<double>& s_in, const std::vector<double>& f_in) {
     std::vector<double> s(dim_), f(dim_);
     for (unsigned i = 0; i < dim_; ++i) {
       s[i] = wrapToDomain(i, s_in[i]);
-      
+      // Clamping applied to lambda-kernel forces only; z-kernels are unclamped.
       f[i] = std::max(-muxClamp_, std::min(muxClamp_, f_in[i]));
     }
 
-    
-    
-    
-    
+    // Pre-arrival bandwidth: the incoming sample is conceptually a mini-kernel
+    // with the bandwidth that existed before it changed the statistics.
+    // Computing this before any counter updates makes the absorption and
+    // new-kernel branches use the same sigma snapshot.
     std::vector<double> sig = currentSigma();
 
     int k = findMergeable(s, -1);
-    unsigned giver;   
+    unsigned giver;   // index of the kernel to start recursive merging from
 
     if (k >= 0) {
-      
+      // ── Absorption: merge sample into existing kernel k ──────────────
       double Nold = kernels_[k].Nk;
       sumNk2_ -= Nold*Nold;
       kernels_[k].Nk += 1.0;
       double Nnew = kernels_[k].Nk;
       sumNk2_ += Nnew*Nnew;
       totalN_ += 1.0;
+      const double inv_Nnew = 1.0 / Nnew;
 
       for (unsigned i = 0; i < dim_; ++i) {
-        
+        // mu: exact running mean
         double muold = kernels_[k].mu[i];
-        double munew = (Nold*muold + f[i]) / Nnew;
+        double munew = (Nold*muold + f[i]) * inv_Nnew;
         kernels_[k].mu[i] = std::max(-muxClamp_, std::min(muxClamp_, munew));
 
-        
+        // center + sigma: parallel variance with pre-arrival mini-kernel
         double ct = kernels_[k].center[i];
         double cs = ct + periodicDelta(i, ct, s[i]);
-        double c_new = (Nold * ct + 1.0 * cs) / Nnew;
+        double c_new = (Nold * ct + cs) * inv_Nnew;
         double dt = ct - c_new, ds = cs - c_new;
         double var = (Nold * (sq(kernels_[k].sigma[i]) + sq(dt)) +
-                      1.0  * (sq(sig[i])               + sq(ds))) / Nnew;
+                             (sq(sig[i])               + sq(ds))) * inv_Nnew;
         kernels_[k].center[i] = wrapToDomain(i, c_new);
         kernels_[k].sigma[i] = std::sqrt(std::max(var,
-            sq(sigmaMin_.size() > 0 ? sigmaMin_[i] : 1e-6)));
+            sq(hasMin_ ? sigmaMin_[i] : 1e-6)));
       }
       giver = (unsigned)k;
 
     } else {
-      
+      // ── New kernel at pre-arrival Silverman bandwidth ────────────────
       Kernel nk;
       nk.center.resize(dim_); nk.mu.resize(dim_); nk.sigma.resize(dim_);
       for (unsigned i = 0; i < dim_; ++i) {
@@ -403,7 +481,7 @@ private:
         nk.sigma[i] = sig[i];
       }
       nk.Nk = 1.0;
-      kernels_.push_back(nk);
+      kernels_.push_back(std::move(nk));
       ++M_;
       totalN_ += 1.0;
       sumNk2_ += 1.0;
@@ -411,115 +489,77 @@ private:
       giver = M_ - 1;
     }
 
-    
-    
-    
-    
-    std::vector<double> gc(kernels_[giver].center);
-    int taker = findMergeable(gc, (int)giver);
-    while (taker >= 0) {
-      double Nt = kernels_[taker].Nk, Ng = kernels_[giver].Nk, Ntot = Nt + Ng;
-      sumNk2_ -= (Nt*Nt + Ng*Ng);
-      if (Ntot > 0) {
-        for (unsigned i = 0; i < dim_; ++i) {
-          double ct = kernels_[taker].center[i];
-          double cg = kernels_[giver].center[i];
-          if (periodic_[i] && domLen_[i] > 0)
-            cg = ct + periodicDelta(i, ct, cg);
-          double c_new = (Nt*ct + Ng*cg) / Ntot;
-          double dt = ct - c_new, dg = cg - c_new;
-          double var = (Nt*(sq(kernels_[taker].sigma[i]) + sq(dt)) +
-                        Ng*(sq(kernels_[giver].sigma[i]) + sq(dg))) / Ntot;
-          kernels_[taker].center[i] = wrapToDomain(i, c_new);
-          kernels_[taker].sigma[i] = std::sqrt(std::max(var, sq(sigmaMin_.size()>0 ? sigmaMin_[i] : 1e-6)));
-          kernels_[taker].mu[i] = std::max(-muxClamp_, std::min(muxClamp_,
-              (Nt*kernels_[taker].mu[i] + Ng*kernels_[giver].mu[i]) / Ntot));
-        }
-        kernels_[taker].Nk = Ntot;
-        sumNk2_ += Ntot*Ntot;
-      }
+    // ── Recursive merge from giver (runs for BOTH branches) ────────────
+    // After absorption the kernel's center has shifted; after new-kernel
+    // creation the kernel may overlap a neighbor. In either case, check
+    // for cascading merges until no more candidates remain.
+    mergeKernelPool(giver, kernels_, M_, sumNk2_, nlistIdx_,
+        [this](const std::vector<double>& c, int ex){ return findMergeable(c, ex); },
+        [this](double mu){ return std::max(-muxClamp_, std::min(muxClamp_, mu)); });
 
-      
-      unsigned last = M_-1, newGiver = (unsigned)taker;
-      if (giver != last && (unsigned)taker == last) newGiver = giver;
-      if (giver != last) kernels_[giver] = kernels_[last];
-      kernels_.resize(last);
-      --M_;
-      if (nlist_) {
-        for (auto it = nlistIdx_.begin(); it != nlistIdx_.end(); ) {
-          if (*it == giver) { it = nlistIdx_.erase(it); }
-          else {
-            if (*it == last) *it = giver;
-            ++it;
-          }
-        }
-      }
-      giver = newGiver;
-      gc.assign(kernels_[giver].center.begin(), kernels_[giver].center.end());
-      taker = findMergeable(gc, (int)giver);
-    }
-    
+    // Cascading merges may have shifted kernel centers; flag nlist rebuild.
     if (nlist_) nlistUpdate_ = true;
   }
 
-  
-  
-  
+  // ================ z-kernel accumulation (CZAR) ================
+  // z-kernels are centred at the real CV z, store the unclamped spring force,
+  // and always use the exact running mean.
   void addZSample(const std::vector<double>& z_in,
                   const std::vector<double>& f_raw) {
     std::vector<double> z(dim_);
     for (unsigned i = 0; i < dim_; ++i)
       z[i] = wrapToDomain(i, z_in[i]);
-    
+    // f_raw = kappa(z - lambda), unclamped -- do NOT clamp here.
 
-    
+    // Maintain a local z-kernel neighbor list around the current real CV.
     if (nlist_ && zM_ > 0) {
       if (znlistUpdate_ || needsZNlistUpdate(z)) updateZNlist(z);
     }
 
-    
+    // Pre-arrival bandwidth (same rationale as addSample).
     std::vector<double> sig = currentZSigma();
 
     int best = findMergeableZ(z, -1);
-    unsigned giver;   
+    unsigned giver;   // index to start recursive merging from
 
     if (best >= 0) {
-      
+      // ── Absorption: merge sample into existing z-kernel ──────────────
       double Nold = zKernels_[best].Nk;
       zSumNk2_ -= Nold*Nold;
       zKernels_[best].Nk += 1.0;
       double Nnew = zKernels_[best].Nk;
       zSumNk2_ += Nnew*Nnew;
       zTotalN_ += 1.0;
+      const double inv_Nnew = 1.0 / Nnew;
 
       for (unsigned i = 0; i < dim_; ++i) {
-        
-        zKernels_[best].mu[i] = (Nold * zKernels_[best].mu[i] + f_raw[i]) / Nnew;
+        // mu: exact running mean, unclamped
+        zKernels_[best].mu[i] = (Nold * zKernels_[best].mu[i] + f_raw[i]) * inv_Nnew;
 
-        
+        // center + sigma: parallel variance with pre-arrival mini-kernel
         double ct = zKernels_[best].center[i];
         double cs = ct + periodicDelta(i, ct, z[i]);
-        double c_new = (Nold * ct + 1.0 * cs) / Nnew;
+        double c_new = (Nold * ct + cs) * inv_Nnew;
         double dt = ct - c_new, ds = cs - c_new;
         double var = (Nold * (sq(zKernels_[best].sigma[i]) + sq(dt)) +
-                      1.0  * (sq(sig[i])                   + sq(ds))) / Nnew;
+                             (sq(sig[i])                   + sq(ds))) * inv_Nnew;
         zKernels_[best].center[i] = wrapToDomain(i, c_new);
         zKernels_[best].sigma[i] = std::sqrt(std::max(var,
-            sq(sigmaMin_.size() > 0 ? sigmaMin_[i] : 1e-6)));
+            sq(hasMin_ ? sigmaMin_[i] : 1e-6)));
       }
       giver = (unsigned)best;
 
     } else {
-      
+      // ── New z-kernel at pre-arrival Silverman bandwidth ──────────────
       ZKernel nk;
       nk.center.resize(dim_); nk.mu.resize(dim_); nk.sigma.resize(dim_);
       for (unsigned i = 0; i < dim_; ++i) {
         nk.center[i] = z[i];
-        nk.mu[i]     = f_raw[i];   
+        nk.mu[i]     = f_raw[i];   // unclamped
         nk.sigma[i]  = sig[i];
       }
       nk.Nk = 1.0;
-      zKernels_.push_back(nk);
+      zKernels_.push_back(std::move(nk));
       ++zM_;
       zTotalN_ += 1.0;
       zSumNk2_ += 1.0;
@@ -530,56 +570,16 @@ private:
       giver = zM_ - 1;
     }
 
-    
-    std::vector<double> gc(zKernels_[giver].center);
-    int taker = findMergeableZ(gc, (int)giver);
-    while (taker >= 0) {
-      double Nt = zKernels_[taker].Nk, Ng = zKernels_[giver].Nk, Ntot = Nt + Ng;
-      zSumNk2_ -= (Nt*Nt + Ng*Ng);
-      if (Ntot > 0) {
-        for (unsigned i = 0; i < dim_; ++i) {
-          double ct = zKernels_[taker].center[i];
-          double cg = zKernels_[giver].center[i];
-          if (periodic_[i] && domLen_[i] > 0)
-            cg = ct + periodicDelta(i, ct, cg);
-          double c_new = (Nt*ct + Ng*cg) / Ntot;
-          double dt = ct - c_new, dg = cg - c_new;
-          double var = (Nt*(sq(zKernels_[taker].sigma[i]) + sq(dt)) +
-                        Ng*(sq(zKernels_[giver].sigma[i]) + sq(dg))) / Ntot;
-          zKernels_[taker].center[i] = wrapToDomain(i, c_new);
-          zKernels_[taker].sigma[i] = std::sqrt(std::max(var,
-              sq(sigmaMin_.size()>0 ? sigmaMin_[i] : 1e-6)));
-          zKernels_[taker].mu[i] =
-              (Nt*zKernels_[taker].mu[i] + Ng*zKernels_[giver].mu[i]) / Ntot;
-        }
-        zKernels_[taker].Nk = Ntot;
-        zSumNk2_ += Ntot*Ntot;
-      }
+    // ── Recursive merge from giver (runs for BOTH branches) ────────────
+    mergeKernelPool(giver, zKernels_, zM_, zSumNk2_, znlistIdx_,
+        [this](const std::vector<double>& c, int ex){ return findMergeableZ(c, ex); },
+        [](double mu){ return mu; });
 
-      
-      unsigned last = zM_ - 1, newGiver = (unsigned)taker;
-      if (giver != last && (unsigned)taker == last) newGiver = giver;
-      if (giver != last) zKernels_[giver] = zKernels_[last];
-      zKernels_.resize(last);
-      --zM_;
-      if (nlist_) {
-        for (auto it = znlistIdx_.begin(); it != znlistIdx_.end(); ) {
-          if (*it == giver) { it = znlistIdx_.erase(it); }
-          else {
-            if (*it == last) *it = giver;
-            ++it;
-          }
-        }
-      }
-      giver = newGiver;
-      gc.assign(zKernels_[giver].center.begin(), zKernels_[giver].center.end());
-      taker = findMergeableZ(gc, (int)giver);
-    }
-    
+    // Flag nlist rebuild after any center/sigma changes.
     if (nlist_) znlistUpdate_ = true;
   }
 
-  
+  // ================ grid indexing ================
   unsigned gridFlat(const std::vector<unsigned>& idx) const {
     unsigned f = 0;
     for (unsigned d = 0; d < dim_; ++d) f = f * gridN_[d] + idx[d];
@@ -593,21 +593,24 @@ private:
     return gridMin_[d] + idx * gridDx_[d];
   }
 
-  
-  
-  
-  
-  
+  // ================ grid mean-force evaluation (lambda-kernels, for bias) ========
+  // Pure Nadaraya-Watson regression weighted by Nk.  Returns the estimated
+  // mean force ĝ(s) at each grid point, and the NW denominator Z[g] which
+  // measures kernel support at each node.
+  // The mean-force clamp (maxForce_) is applied downstream in reconstructBiasGrid.
   void evaluateGridMeanForces(std::vector<double>& ghat, std::vector<double>& Zgrid) {
     ghat.assign(gridTotal_ * dim_, 0.0);
     Zgrid.assign(gridTotal_, 0.0);
     if (M_ == 0) return;
 
-    std::vector<double>& Z = Zgrid;   
+    std::vector<double>& Z = Zgrid;   // alias — filled in-place
     std::vector<double> numF(gridTotal_ * dim_, 0.0);
 
+    std::vector<int> R(dim_), ic(dim_);
+    std::vector<std::vector<double>> w1d(dim_);
+    std::vector<std::vector<unsigned>> gi1d(dim_);
+
     for (unsigned kk = 0; kk < M_; ++kk) {
-      std::vector<int> R(dim_), ic(dim_);
       for (unsigned d = 0; d < dim_; ++d) {
         R[d] = (int)std::ceil(nsigmaCut_ * kernels_[kk].sigma[d] / std::max(gridDx_[d], 1e-12));
         ic[d] = (int)std::round((kernels_[kk].center[d] - gridMin_[d]) / gridDx_[d]);
@@ -617,12 +620,10 @@ private:
           ic[d] = std::max(0, std::min(ic[d], (int)gridN_[d]-1));
       }
 
-      std::vector<std::vector<double>> w1d(dim_);
-      std::vector<std::vector<unsigned>> gi1d(dim_);
       for (unsigned d = 0; d < dim_; ++d) {
         double inv4s2 = 1.0 / (4.0 * sq(kernels_[kk].sigma[d]) + 1e-300);
-        w1d[d].reserve(2*R[d]+1);
-        gi1d[d].reserve(2*R[d]+1);
+        w1d[d].clear();   w1d[d].reserve(2*R[d]+1);
+        gi1d[d].clear(); gi1d[d].reserve(2*R[d]+1);
         for (int r = -R[d]; r <= R[d]; ++r) {
           int raw = ic[d] + r;
           unsigned gi;
@@ -640,8 +641,8 @@ private:
         }
       }
 
-      
-      
+      // Nadaraya-Watson regression: weight by Nk so that well-sampled
+      // kernels dominate the local mean-force estimate.
       const double Nk_kk = kernels_[kk].Nk;
       if (dim_ == 1) {
         for (unsigned a = 0; a < w1d[0].size(); ++a) {
@@ -678,7 +679,7 @@ private:
       }
     }
 
-    
+    // Z[g] = Σ_k w_k·Nk serves as the NW denominator.
     for (unsigned g = 0; g < gridTotal_; ++g) {
       if (Z[g] > 1e-300) {
         for (unsigned d = 0; d < dim_; ++d) ghat[g*dim_+d] = numF[g*dim_+d] / Z[g];
@@ -686,15 +687,15 @@ private:
     }
   }
 
-  
-  
-  
-  
+  // ================ bias grid reconstruction (direct mean force, DRR-style) ====
+  // Computes: ghat_ (ABF mean force), Zgrid_ (NW denominator), fex_ (exploration force).
+  // All three grids are updated atomically at GRIDPACE intervals.
+  // Between rebuilds, the total force on λ is completely frozen — ideal for BAOAB.
   void reconstructBiasGrid() {
     std::vector<double> ghat, Zgrid;
     evaluateGridMeanForces(ghat, Zgrid);
 
-    
+    // Clamp and store the mean force grid for direct interpolation.
     ghat_.assign(gridTotal_*dim_, 0.0);
     for (unsigned g = 0; g < gridTotal_; ++g)
       for (unsigned d = 0; d < dim_; ++d) {
@@ -703,26 +704,32 @@ private:
         ghat_[g*dim_+d] = v;
       }
 
-    
+    // Store Z grid for Neff and V_ex interpolation.
     Zgrid_ = Zgrid;
 
-    
+    // Update Z₀ and compute exploration force on grid.
     fex_.assign(gridTotal_*dim_, 0.0);
     if (biasFactor_ > 1.0) {
-      
+      // Z₀ = median of Z over populated nodes.
       std::vector<double> Zpop;
       Zpop.reserve(gridTotal_);
       for (unsigned g = 0; g < gridTotal_; ++g)
         if (Zgrid[g] > 1e-10) Zpop.push_back(Zgrid[g]);
       if (!Zpop.empty()) {
-        std::sort(Zpop.begin(), Zpop.end());
         size_t n = Zpop.size();
-        Z0_density_ = (n % 2 == 0) ? 0.5*(Zpop[n/2-1]+Zpop[n/2]) : Zpop[n/2];
+        std::nth_element(Zpop.begin(), Zpop.begin() + n/2, Zpop.end());
+        if (n % 2 == 1) {
+          Z0_density_ = Zpop[n/2];
+        } else {
+          double upper = Zpop[n/2];
+          double lower = *std::max_element(Zpop.begin(), Zpop.begin() + n/2);
+          Z0_density_ = 0.5 * (lower + upper);
+        }
       }
       if (Z0_density_ < 1e-10) Z0_density_ = 1.0;
 
-      
-      
+      // Compute ∇Z via finite differences, then F_ex = -c·∇Z/(Z₀+Z) at each grid point.
+      // Strides for flat indexing along each dimension.
       std::vector<unsigned> strides(dim_);
       strides[dim_-1] = 1;
       for (int dd = (int)dim_-2; dd >= 0; --dd)
@@ -730,12 +737,12 @@ private:
 
       double c_ex = kT_ * (biasFactor_ - 1.0);
 
+      std::vector<unsigned> idx(dim_);
       for (unsigned g = 0; g < gridTotal_; ++g) {
-        if (Zgrid[g] < 1e-300) continue;  
+        if (Zgrid[g] < 1e-300) continue;  // no data, no force
         double denom = Z0_density_ + Zgrid[g];
 
-        
-        std::vector<unsigned> idx(dim_);
+        // Extract multi-index for boundary checks.
         gridUnflat(g, idx);
 
         for (unsigned d = 0; d < dim_; ++d) {
@@ -744,24 +751,24 @@ private:
           unsigned stride_d = strides[d];
 
           if (periodic_[d]) {
-            
+            // Central difference with periodic wrap.
             unsigned gp = g + ((idx[d]+1 < N_d) ? stride_d : -(N_d-1)*stride_d);
             unsigned gm = g - ((idx[d] > 0) ? stride_d : -(N_d-1)*stride_d);
             dZds = (Zgrid[gp] - Zgrid[gm]) / (2.0 * gridDx_[d]);
           } else if (idx[d] == 0) {
-            
+            // Forward difference at left boundary.
             if (N_d >= 3)
               dZds = (-3.0*Zgrid[g] + 4.0*Zgrid[g+stride_d] - Zgrid[g+2*stride_d]) / (2.0*gridDx_[d]);
             else
               dZds = (Zgrid[g+stride_d] - Zgrid[g]) / gridDx_[d];
           } else if (idx[d] == N_d-1) {
-            
+            // Backward difference at right boundary.
             if (N_d >= 3)
               dZds = (3.0*Zgrid[g] - 4.0*Zgrid[g-stride_d] + Zgrid[g-2*stride_d]) / (2.0*gridDx_[d]);
             else
               dZds = (Zgrid[g] - Zgrid[g-stride_d]) / gridDx_[d];
           } else {
-            
+            // Central difference.
             dZds = (Zgrid[g+stride_d] - Zgrid[g-stride_d]) / (2.0 * gridDx_[d]);
           }
 
@@ -780,11 +787,11 @@ private:
     log.printf(")\n");
   }
 
-  
-  
-  
-  
-  
+  // ================ direct mean-force interpolation (DRR-style) ================
+  // Multilinear interpolation of the NW mean force grid ghat_.
+  // This bypasses the Poisson solver entirely: the ABF cancellation force
+  // is the negative of the interpolated mean force, exactly as DRR does it.
+  // No integration, no differentiation, no boundary artifacts.
   void interpolateForce(const std::vector<double>& s, std::vector<double>& force) const {
     force.assign(dim_, 0.0);
     if (ghat_.empty()) return;
@@ -818,7 +825,7 @@ private:
     }
   }
 
-  
+  // Multilinear interpolation of a scalar grid (used for Zgrid_ -> Neff, V_ex).
   double interpolateScalar(const std::vector<double>& s, const std::vector<double>& grid) const {
     if (grid.empty()) return 0.0;
     std::vector<double> frac(dim_);
@@ -852,7 +859,7 @@ private:
     return val;
   }
 
-  
+  // Multilinear interpolation of the exploration force grid fex_.
   void interpolateExplore(const std::vector<double>& s, std::vector<double>& force) const {
     force.assign(dim_, 0.0);
     if (fex_.empty()) return;
@@ -886,7 +893,7 @@ private:
     }
   }
 
-  
+  // ================ lambda-grid output (DEBUG: mean force on λ grid) ========
   void writeGridFile() {
     if (lambdaGridFile_.empty()) return;
     std::string path = stampedPath(lambdaGridFile_);
@@ -936,11 +943,11 @@ private:
                path.c_str(), M_, (long long)getStep());
   }
 
-  
-  
-  
-  
-  
+  // ================ lambda-kernel dump ================
+  // Human-readable columnar format. Each call writes a fresh step-stamped file.
+  // Columns use CV names, plus derived quantities:
+  //   |mu|   -- force magnitude (kJ/mol per CV unit)
+  //   wt     -- Nk / totalN (fractional weight of this kernel)
   void dumpKernelsIfNeeded() {
     if (kernelFile_.empty() || kernelStride_ == 0) return;
     if (getStep() % kernelStride_ != 0) return;
@@ -958,19 +965,16 @@ private:
     std::fprintf(kfile, ")\n");
     std::fprintf(kfile, "# --------------------------------------------------------\n");
 
+    std::vector<std::string> cvNames(dim_);
+    for (unsigned i = 0; i < dim_; ++i) cvNames[i] = getPntrToArgument(i)->getName();
+
     std::fprintf(kfile, "# %5s  %8s", "k", "Nk");
-    for (unsigned i = 0; i < dim_; ++i) {
-      std::string cvn = getPntrToArgument(i)->getName();
-      std::fprintf(kfile, "  %12s", ("c_"+cvn).c_str());
-    }
-    for (unsigned i = 0; i < dim_; ++i) {
-      std::string cvn = getPntrToArgument(i)->getName();
-      std::fprintf(kfile, "  %12s", ("mu_"+cvn).c_str());
-    }
-    for (unsigned i = 0; i < dim_; ++i) {
-      std::string cvn = getPntrToArgument(i)->getName();
-      std::fprintf(kfile, "  %10s", ("sig_"+cvn).c_str());
-    }
+    for (unsigned i = 0; i < dim_; ++i)
+      std::fprintf(kfile, "  %12s", ("c_"+cvNames[i]).c_str());
+    for (unsigned i = 0; i < dim_; ++i)
+      std::fprintf(kfile, "  %12s", ("mu_"+cvNames[i]).c_str());
+    for (unsigned i = 0; i < dim_; ++i)
+      std::fprintf(kfile, "  %10s", ("sig_"+cvNames[i]).c_str());
     std::fprintf(kfile, "  %10s  %8s\n", "|mu|", "wt");
 
     for (unsigned kk = 0; kk < M_; ++kk) {
@@ -990,10 +994,10 @@ private:
                path.c_str(), M_, (long long)getStep());
   }
 
-  
-  
-  
-  
+  // ================ stamped filename helper ================
+  // Inserts _{step:08d} before the extension of any base filename.
+  // e.g. "fk.czar_kernels.dat" at step 50000 -> "fk.czar_kernels_00050000.dat"
+  // All three output files use this so snapshots are never overwritten.
   std::string stampedPath(const std::string& base) const {
     char buf[32];
     std::snprintf(buf, sizeof(buf), "_%08lld", (long long)getStep());
@@ -1002,6 +1006,10 @@ private:
     return base.substr(0, dot) + buf + base.substr(dot);
   }
 
+  // ================ CZAR z-kernel file ================
+  // Step-stamped snapshot of all z-kernels; never overwritten between writes.
+  // The file header embeds kappa, kT, periodicity, and domain so that
+  // czar_integrate.py can reconstruct A(z) without access to the input file.
   void writeCZARFile() {
     if (czarFile_.empty() || zM_ == 0) return;
     std::string path = stampedPath(czarFile_);
@@ -1049,22 +1057,22 @@ private:
                path.c_str(), zM_, (long long)getStep());
   }
 
-  
-  
-  
-  
-  
-  
-  
-
+  // ================ restart state I/O ================
+  // The state file contains everything needed to resume a simulation:
+  //   - fictitious particle position and velocity
+  //   - adaptive sigma state
+  //   - lambda-kernel population (center, mu, sigma, Nk)
+  //   - z-kernel population (center, mu, sigma, Nk)
+  //   - Z0_density for exploration
   void writeState() {
     if (stateFile_.empty()) return;
-    
-    
-    std::ofstream f(stateFile_.c_str());
+    // Write to a temporary file then atomically rename to avoid corruption
+    // if the process is killed mid-write.
+    std::string tmpFile = stateFile_ + ".tmp";
+    std::ofstream f(tmpFile.c_str());
     if (!f.is_open()) {
       log.printf("  [FKERNELABF] WARNING: could not open state file '%s' for writing.\n",
-                 stateFile_.c_str());
+                 tmpFile.c_str());
       return;
     }
     f << std::setprecision(15);
@@ -1111,19 +1119,35 @@ private:
       f << "\n";
     }
 
-    
-    
-    {
-      std::ostringstream rng_ss;
-      rng_ss << rng_;
-      f << "RNG " << rng_ss.str() << "\n";
-    }
+    // RNG state for reproducible restart.
+    // std::mt19937 supports << / >> for full internal state serialization.
+    f << "RNG " << rng_ << "\n";
 
     f << "END\n";
 
     f.flush();
-    log.printf("  [FKERNELABF] State written: %s  (M=%u, zM=%u, step %lld)\n",
-               stateFile_.c_str(), M_, zM_, (long long)getStep());
+    if (!f.good()) {
+      log.printf("  [FKERNELABF] WARNING: I/O error writing state file '%s'.\n",
+                 tmpFile.c_str());
+      return;
+    }
+    f.close();
+    if (std::rename(tmpFile.c_str(), stateFile_.c_str()) != 0)
+      log.printf("  [FKERNELABF] WARNING: could not rename '%s' to '%s'.\n",
+                 tmpFile.c_str(), stateFile_.c_str());
+    else
+      log.printf("  [FKERNELABF] State written: %s  (M=%u, zM=%u, step %lld)\n",
+                 stateFile_.c_str(), M_, zM_, (long long)getStep());
+  }
+
+  // Helper for readState(): aborts with a descriptive error if the stream
+  // is in a failed state after parsing 'description'.  readState uses this
+  // pattern inline for most fields; this helper exists for any future
+  // consolidation where the repeated literal string would be too verbose.
+  void parseCheck(const std::istringstream& iss, const std::string& description) {
+    if (iss.fail())
+      error("RESTART state file: failed to parse " + description
+            + " — file may be truncated or corrupted.");
   }
 
   void readState() {
@@ -1137,7 +1161,7 @@ private:
     f.open(stateFile_);
     log.printf("  [FKERNELABF] Reading state from: %s\n", stateFile_.c_str());
 
-    
+    // Clear existing kernel data
     kernels_.clear(); M_ = 0; totalN_ = 0; sumNk2_ = 0;
     zKernels_.clear(); zM_ = 0; zTotalN_ = 0; zSumNk2_ = 0;
 
@@ -1164,61 +1188,94 @@ private:
                 + ". Cannot restart with different temperature.");
       } else if (key == "s_fict") {
         for (unsigned i = 0; i < dim_; ++i) iss >> s_fict_[i];
+        if (!iss) error("RESTART state file: failed to parse 's_fict' — file may be truncated or corrupted.");
       } else if (key == "v_fict") {
         for (unsigned i = 0; i < dim_; ++i) iss >> v_fict_[i];
+        if (!iss) error("RESTART state file: failed to parse 'v_fict' — file may be truncated or corrupted.");
       } else if (key == "sigma0") {
         for (unsigned i = 0; i < dim_; ++i) iss >> sigma0_[i];
+        if (!iss) error("RESTART state file: failed to parse 'sigma0' — file may be truncated or corrupted.");
       } else if (key == "adaptive_done") {
         int done; iss >> done;
+        if (!iss) error("RESTART state file: failed to parse 'adaptive_done' — file may be truncated or corrupted.");
         if (done) {
           adaptiveSigma_ = false;
-          adaptiveCounter_ = adaptiveSigmaStride_ + 1;  
+          adaptiveCounter_ = adaptiveSigmaStride_ + 1;
         }
       } else if (key == "Z0_density") {
         iss >> Z0_density_;
+        if (!iss) error("RESTART state file: failed to parse 'Z0_density' — file may be truncated or corrupted.");
       } else if (key == "M") {
         iss >> M_;
       } else if (key == "totalN") {
         iss >> totalN_;
+        if (!iss) error("RESTART state file: failed to parse 'totalN' — file may be truncated or corrupted.");
       } else if (key == "sumNk2") {
         iss >> sumNk2_;
+        if (!iss) error("RESTART state file: failed to parse 'sumNk2' — file may be truncated or corrupted.");
       } else if (key == "zM") {
         iss >> zM_;
       } else if (key == "zTotalN") {
         iss >> zTotalN_;
+        if (!iss) error("RESTART state file: failed to parse 'zTotalN' — file may be truncated or corrupted.");
       } else if (key == "zSumNk2") {
         iss >> zSumNk2_;
+        if (!iss) error("RESTART state file: failed to parse 'zSumNk2' — file may be truncated or corrupted.");
       } else if (key == "K") {
-        
+        // Lambda-kernel data line
         Kernel nk;
         nk.center.resize(dim_); nk.mu.resize(dim_); nk.sigma.resize(dim_);
         iss >> nk.Nk;
         for (unsigned i = 0; i < dim_; ++i) iss >> nk.center[i];
         for (unsigned i = 0; i < dim_; ++i) iss >> nk.mu[i];
         for (unsigned i = 0; i < dim_; ++i) iss >> nk.sigma[i];
+        if (!iss) error("RESTART state file: failed to parse kernel 'K' row — file may be truncated or corrupted.");
+        if (nk.Nk <= 0)
+          error("RESTART state file: kernel 'K' has Nk=" + std::to_string(nk.Nk)
+                + " <= 0. Corrupted state file.");
+        for (unsigned i = 0; i < dim_; ++i)
+          if (nk.sigma[i] <= 0.0 || !std::isfinite(nk.sigma[i]))
+            error("RESTART state file: kernel 'K' has sigma[" + std::to_string(i)
+                  + "]=" + std::to_string(nk.sigma[i]) + " which is non-positive or non-finite. Corrupted state file.");
+        for (unsigned i = 0; i < dim_; ++i)
+          if (!std::isfinite(nk.center[i]) || !std::isfinite(nk.mu[i]))
+            error("RESTART state file: kernel 'K' has non-finite center or mu at dimension "
+                  + std::to_string(i) + ". Corrupted state file.");
         kernels_.push_back(nk);
       } else if (key == "Z") {
-        
+        // Z-kernel data line
         ZKernel nk;
         nk.center.resize(dim_); nk.mu.resize(dim_); nk.sigma.resize(dim_);
         iss >> nk.Nk;
         for (unsigned i = 0; i < dim_; ++i) iss >> nk.center[i];
         for (unsigned i = 0; i < dim_; ++i) iss >> nk.mu[i];
         for (unsigned i = 0; i < dim_; ++i) iss >> nk.sigma[i];
+        if (!iss) error("RESTART state file: failed to parse z-kernel 'Z' row — file may be truncated or corrupted.");
+        if (nk.Nk <= 0)
+          error("RESTART state file: z-kernel 'Z' has Nk=" + std::to_string(nk.Nk)
+                + " <= 0. Corrupted state file.");
+        for (unsigned i = 0; i < dim_; ++i)
+          if (nk.sigma[i] <= 0.0 || !std::isfinite(nk.sigma[i]))
+            error("RESTART state file: z-kernel 'Z' has sigma[" + std::to_string(i)
+                  + "]=" + std::to_string(nk.sigma[i]) + " which is non-positive or non-finite. Corrupted state file.");
+        for (unsigned i = 0; i < dim_; ++i)
+          if (!std::isfinite(nk.center[i]) || !std::isfinite(nk.mu[i]))
+            error("RESTART state file: z-kernel 'Z' has non-finite center or mu at dimension "
+                  + std::to_string(i) + ". Corrupted state file.");
         zKernels_.push_back(nk);
       } else if (key == "RNG") {
-        
-        
-        
+        // Restore full mt19937 state for reproducible restart.
+        // The rest of the line contains the serialized state (624 words + index).
+        // Old state files without this line will just use a fresh random seed.
         iss >> rng_;
       } else if (key == "END") {
         break;
       }
-      
-      
+      // Unknown keys (from old state file versions, etc.)
+      // are silently skipped for backward compatibility.
     }
 
-    
+    // Validate
     if (kernels_.size() != M_) {
       log.printf("  [FKERNELABF] WARNING: state file M=%u but read %lu lambda-kernels. "
                  "Using actual count.\n", M_, (unsigned long)kernels_.size());
@@ -1230,7 +1287,7 @@ private:
       zM_ = zKernels_.size();
     }
 
-    
+    // Populate neighbor list indices for all restored kernels
     if (nlist_) {
       nlistIdx_.clear();
       for (unsigned k = 0; k < M_; ++k) nlistIdx_.push_back(k);
@@ -1240,13 +1297,13 @@ private:
       znlistUpdate_ = true;
     }
 
-    
+    // Skip adaptive sigma warmup since we restored learned sigma
     if (adaptiveSigma_) {
       adaptiveSigma_ = false;
       adaptiveCounter_ = adaptiveSigmaStride_ + 1;
     }
 
-    
+    // Mark that first step should NOT re-initialise s_fict from z
     firstStep_ = false;
 
     log.printf("  [FKERNELABF] State restored: M=%u totalN=%.0f zM=%u zTotalN=%.0f "
@@ -1263,13 +1320,13 @@ public:
     Bias::registerKeywords(keys);
     keys.use("ARG");
 
-    
+    // Extended Lagrangian
     keys.add("compulsory", "KAPPA",   "Spring constant(s) for extended Lagrangian.");
     keys.add("compulsory", "TAU",     "0.5", "Oscillation period(s) (determines mass).");
     keys.add("compulsory", "FRICTION","10.0","Langevin friction (1/time_unit).");
     keys.add("compulsory", "TEMP",    "300.0","Temperature (K).");
 
-    
+    // Kernel parameters
     keys.add("optional", "SIGMA",
              "Initial kernel bandwidth(s). If omitted, set automatically from CV "
              "fluctuations measured over ADAPTIVE_SIGMA_STRIDE unbiased steps.");
@@ -1287,11 +1344,11 @@ public:
              "Kernel cutoff in sigma units per dimension. "
              "Kernels further than NSIGMACUT×σ are ignored in NW regression. "
              "4.0 gives <2%% contribution at the cutoff boundary.");
-    
-    
-    
-    
-    
+    // Deprecated keywords — silently consumed so old input files still parse.
+    // ETA (biased learning rate): always 1.0 (exact mean) since v2.0.
+    // N0, LINEARGATE: removed in v1.1; kept here for backward compatibility only.
+    // LAMBDAMAX: hardcoded to 1.0 in v3.0.
+    // VCLAMP: removed in v3.0; replaced by MUXCLAMP and MAXFORCE.
     keys.add("optional", "ETA",
              "Deprecated: ignored. Lambda-kernel mean force always uses exact running mean.");
     keys.add("optional", "N0", "Deprecated: ignored. Kept for backward compatibility.");
@@ -1299,7 +1356,7 @@ public:
     keys.add("optional", "LAMBDAMAX", "Deprecated in v3.0: hardcoded to 1.0.");
     keys.add("optional", "VCLAMP",   "Deprecated in v3.0: removed. Use MUXCLAMP and MAXFORCE.");
 
-    
+    // Density-based exploration on λ
     keys.add("compulsory", "BIASFACTOR", "1.0",
              "Exploration factor γ (>= 1.0).  "
              "1.0 = pure ABF (no exploration).  "
@@ -1310,7 +1367,7 @@ public:
              "ABF mean force.  Pushes λ away from well-sampled basins. "
              "The CZAR estimator on z is unaffected.");
 
-    
+    // Force clamps (safety nets — defaults are generous for most systems)
     keys.add("compulsory", "MUXCLAMP", "500.0",
              "Per-kernel mean-force clamp (kJ/mol/rad). Individual kernel mu "
              "values are hard-clamped to [-MUXCLAMP, +MUXCLAMP]. Only fires "
@@ -1320,21 +1377,21 @@ public:
              "grid is clamped per-node before interpolation. Only fires "
              "for unphysically large force estimates.");
 
-    
+    // Grid
     keys.add("compulsory", "GRIDSIZE","72",  "Grid points per dimension.");
     keys.add("compulsory", "GRIDPACE","500", "Reconstruct mean-force grid every GRIDPACE steps.");
     keys.add("optional",   "GRIDMIN",        "Lower grid bound(s) for non-periodic CVs.");
     keys.add("optional",   "GRIDMAX",        "Upper grid bound(s) for non-periodic CVs.");
 
-    
+    // Neighbor list
     keys.addFlag("NONLIST", false, "Disable neighbor list.");
     keys.add("optional", "NLIST_PARAMETERS",
              "Two values: cutoff_factor (default=3.0) and skin_factor (default=0.5).");
 
-    
-    
-    
-    
+    // Output files -- filenames are derived automatically from the action label:
+    //   LAMBDAGRIDSTRIDE -> {label}.lambda_grid.dat   (debug: NW mean force on λ grid)
+    //   KERNELSTRIDE     -> {label}.kernels.dat
+    //   CZARSTRIDE       -> {label}.czar_kernels_{step}.dat
     keys.add("optional", "LAMBDAGRIDSTRIDE",
              "Write lambda mean-force debug grid every N steps. Output is the NW "
              "mean force on the fictitious variable grid -- NOT the free energy A(z). "
@@ -1348,13 +1405,13 @@ public:
              "step-stamped file {label}.czar_kernels_{step:08d}.dat. "
              "Feed the final file to czar_integrate.py to recover A(z).");
 
-    
+    // Restart state
     keys.add("optional", "STATESTRIDE",
              "Write restart state file every N steps (default: CZARSTRIDE if set, "
              "otherwise 10×GRIDPACE). The state file {label}.state.dat is overwritten "
              "in place (no backups). On RESTART, the state is read automatically.");
 
-    
+    // Output components
     keys.addOutputComponent("force2",    "default","squared net bias force magnitude on λ (ABF + exploration)");
     keys.addOutputComponent("lambda",    "default","deprecated: always 1.0 in v3+ (kept for COLVAR compatibility)");
     keys.addOutputComponent("nkernels",  "default","number of compressed lambda-kernels");
@@ -1432,7 +1489,7 @@ public:
     s_fict_.assign(dim_, 0.0);
     v_fict_.assign(dim_, 0.0);
 
-    
+    // Parse kernel parameters early — PACE is needed for the ADAPTIVE_SIGMA_STRIDE default.
     parseFlag("FIXED_SIGMA", fixedSigma_);
     parse("PACE", pace_);
     parse("THRESH", thresh_);
@@ -1448,7 +1505,7 @@ public:
       adaptiveSigma_ = false;
     } else if (sigma0_.empty()) {
       adaptiveSigma_ = true;
-      sigma0_.assign(dim_, 1.0); 
+      sigma0_.assign(dim_, 1.0); // placeholder; overwritten after warmup
     } else {
       error("SIGMA: supply one value, one per CV, or omit entirely for auto-detection");
     }
@@ -1461,7 +1518,7 @@ public:
     adaptiveSigmaStride_ = 0;
     parse("ADAPTIVE_SIGMA_STRIDE", adaptiveSigmaStride_);
     if (adaptiveSigma_ && adaptiveSigmaStride_ == 0)
-      adaptiveSigmaStride_ = 10 * pace_;   
+      adaptiveSigmaStride_ = 10 * pace_;  // 10 strides gives ~10× the per-step variance for a stable estimate
     if (!adaptiveSigma_ && adaptiveSigmaStride_ > 0)
       warning("ADAPTIVE_SIGMA_STRIDE ignored because SIGMA was provided explicitly.");
 
@@ -1475,8 +1532,10 @@ public:
         if (sigmaMin_[i] <= 0.0) error("SIGMA_MIN must be > 0 for all CVs.");
       }
     }
+    hasMin_ = !sigmaMin_.empty();
 
-    
+
+    // Silently consume deprecated keywords so old input files still parse.
     {
       double eta_compat = 1.0; parse("ETA", eta_compat);
       double N0_compat  = 0.0; parse("N0",  N0_compat);
@@ -1487,7 +1546,7 @@ public:
       if (N0_compat > 0.0 || lg_compat)
         log.printf("  [FKERNELABF] NOTE: N0 and LINEARGATE are deprecated and ignored since v2.0.\n");
 
-      
+      // v3.0: LAMBDAMAX hardcoded to 1.0; VCLAMP removed.
       double lmax_compat = 0; parse("LAMBDAMAX", lmax_compat);
       double vclamp_compat = 0; parse("VCLAMP", vclamp_compat);
       if (lmax_compat > 0)
@@ -1520,12 +1579,12 @@ public:
       error("NLIST_PARAMETERS requires two values: cutoff_factor, skin_factor");
     }
 
-    
+    // CZAR output -- filename derived from label
     czarStride_ = 0; parse("CZARSTRIDE", czarStride_);
 
-    
-    
-    
+    // Domain: getDomain() asserts the value is periodic before returning,
+    // so guard with isPeriodic() first — non-periodic CVs (distances, RMSDs, etc.)
+    // crash with "function should be periodic" otherwise.
     periodic_.assign(dim_, false);
     domMin_.assign(dim_, 0); domMax_.assign(dim_, 0); domLen_.assign(dim_, 0);
     for (unsigned i = 0; i < dim_; ++i) {
@@ -1536,8 +1595,8 @@ public:
         domLen_[i] = mx - mn;
         periodic_[i] = (domLen_[i] > 0);
       }
-      
-      
+      // non-periodic: periodic_[i]=false, domMin/Max/Len left at 0
+      // until GRIDMIN/GRIDMAX are parsed below
     }
 
     std::vector<double> userMin, userMax;
@@ -1573,10 +1632,10 @@ public:
     Zgrid_.assign(gridTotal_, 0.0);
     fex_.assign(gridTotal_*dim_, 0.0);
 
-    
-    
+    // Derive all output filenames from the action label.
+    // Users only specify strides; paths are not configurable.
     std::string lbl = getLabel();
-    lambdaGridFile_ = "";          
+    lambdaGridFile_ = "";          // populated below only if LAMBDAGRIDSTRIDE > 0
     lambdaGridStride_ = 0; parse("LAMBDAGRIDSTRIDE", lambdaGridStride_);
     if (lambdaGridStride_ > 0) lambdaGridFile_ = lbl + ".lambda_grid.dat";
 
@@ -1584,10 +1643,10 @@ public:
     kernelStride_ = 0; parse("KERNELSTRIDE", kernelStride_);
     if (kernelStride_ > 0) kernelFile_ = lbl + ".kernels.dat";
 
-    czarFile_ = lbl + ".czar_kernels.dat";  
-    stateFile_ = lbl + ".state.dat";        
+    czarFile_ = lbl + ".czar_kernels.dat";  // base; stamped on each write
+    stateFile_ = lbl + ".state.dat";        // overwritten at STATESTRIDE interval
 
-    
+    // STATESTRIDE: default to CZARSTRIDE if set, else 10×GRIDPACE
     stateStride_ = 0; parse("STATESTRIDE", stateStride_);
     if (stateStride_ == 0) {
       stateStride_ = (czarStride_ > 0) ? czarStride_ : 10 * gridPace_;
@@ -1598,7 +1657,7 @@ public:
     znlistCenter_.assign(dim_, 0.0);
     znlistDev2_.assign(dim_, 0.0);
 
-    
+    // Output components
     addComponent("force2");   componentIsNotPeriodic("force2");
     addComponent("lambda");   componentIsNotPeriodic("lambda");
     addComponent("nkernels"); componentIsNotPeriodic("nkernels");
@@ -1635,7 +1694,7 @@ public:
       for (unsigned i = 0; i < dim_; ++i) log.printf("%s%.4f", i?",":"", sigma0_[i]);
       log.printf("\n");
     }
-    if (sigmaMin_.size() > 0) {
+    if (hasMin_) {
       log.printf("  SIGMA_MIN=");
       for (unsigned i = 0; i < dim_; ++i) log.printf("%s%.4f", i?",":"", sigmaMin_[i]);
       log.printf("\n");
@@ -1657,7 +1716,7 @@ public:
                  gridMin_[i], gridMax_[i], gridDx_[i], gridN_[i]);
     log.printf("  [FKERNELABF] grid update every %u steps  THRESH=%.2f  NSIGMACUT=%.1f\n",
                gridPace_, thresh_, nsigmaCut_);
-    
+    // Output file summary
     log.printf("  [FKERNELABF] Output files (label=%s):\n", lbl.c_str());
     if (czarStride_ > 0)
       log.printf("  [FKERNELABF]   CZAR z-kernels : %s_<step>.dat  every %u steps\n",
@@ -1685,13 +1744,13 @@ public:
 
     checkRead();
 
-    
-    
-    
-    
+    // ── Restart: read state from file if PLUMED restart is active ──────
+    // Usage: add RESTART to the PLUMED input file, or pass --restart to
+    // the MD engine.  The state file {label}.state.dat must exist.
+    // After reading, the mean-force grid is reconstructed immediately.
     if (getRestart()) {
       readState();
-      
+      // Force immediate mean-force grid reconstruction from restored kernels
       if (M_ > 0) reconstructBiasGrid();
     }
   }
@@ -1710,9 +1769,9 @@ public:
       firstStep_ = false;
     }
 
-    
-    
-    
+    // ── Adaptive sigma warmup ─────────────────────────────────────────────────
+    // During the warmup window: zero bias, no kernel deposition, collect variance.
+    // s_fict_ tracks z directly so it starts at the right position when bias begins.
     if (adaptiveSigma_ && adaptiveCounter_ < adaptiveSigmaStride_) {
       adaptiveCounter_++;
       unsigned tau = adaptiveCounter_;
@@ -1727,9 +1786,9 @@ public:
       return;
     }
 
-    
+    // ── Set sigma0_ once at end of warmup ─────────────────────────────────────
     if (adaptiveSigma_ && adaptiveCounter_ == adaptiveSigmaStride_) {
-      adaptiveCounter_++; 
+      adaptiveCounter_++; // guard: run this block exactly once
       for (unsigned i = 0; i < dim_; ++i) {
         double std_i = (adaptiveSigmaStride_ > 1)
             ? std::sqrt(av_M2_[i] / (adaptiveSigmaStride_ - 1))
@@ -1740,7 +1799,7 @@ public:
           std_i = 0.1;
         }
         sigma0_[i] = std_i;
-        if (sigmaMin_.size() > i) sigma0_[i] = std::max(sigma0_[i], sigmaMin_[i]);
+        if (!sigmaMin_.empty()) sigma0_[i] = std::max(sigma0_[i], sigmaMin_[i]);
       }
       log.printf("  [FKERNELABF] Adaptive sigma finalised after %u-step warmup: sigma=(",
                  adaptiveSigmaStride_);
@@ -1749,44 +1808,44 @@ public:
       log.printf(")\n");
     }
 
-    
+    // (A) Spring force: kappa(z - lambda) — raw, unclamped
     std::vector<double> springF(dim_);
     for (unsigned i = 0; i < dim_; ++i) {
-      double d = periodicDelta(i, s_fict_[i], s[i]);  
+      double d = periodicDelta(i, s_fict_[i], s[i]);  // = z - lambda
       springF[i] = kappa_[i] * d;
-      setOutputForce(i, -kappa_[i] * d);  
+      setOutputForce(i, -kappa_[i] * d);  // force on z = kappa(lambda - z)
     }
 
-    
+    // (B) Neighbor list
     if (nlist_ && M_ > 0) {
       if (nlistUpdate_ || needsNlistUpdate(s_fict_))
         updateNlist(s_fict_);
     }
 
-    
-    
-    
+    // (C) Accumulate lambda-kernel sample at s_fict_ (force clamped inside addSample).
+    // (C2) Accumulate z-kernel sample at real CV z (unclamped, exact running mean).
+    // Both happen at the same stride so lambda-kernel and z-kernel populations grow together.
     if (pace_ > 0 && getStep() % pace_ == 0) {
       addSample(s_fict_, springF);
       addZSample(s, springF);
     }
 
-    
+    // (D) Reconstruct NW mean-force grid from lambda-kernels
     if (gridPace_ > 0 && M_ > 0 && getStep() % gridPace_ == 0)
       reconstructBiasGrid();
 
-    
-    
-    
-    
-    
-    
-    
-    
-    
-    
-    
-    
+    // (E) ABF cancellation + exploration forces from grids.
+    //
+    // All forces on λ are interpolated from grids updated at GRIDPACE intervals.
+    // Between rebuilds, the total force is a smooth, frozen function of position.
+    // This gives temporal stability for the BAOAB integrator and eliminates the
+    // per-step O(nlist) kernel scan that previously dominated the cost.
+    //
+    // ABF force:   F_abf = -ghat(λ)         [from ghat_ grid]
+    // Exploration:  F_ex from fex_ grid      [FD of Z, only when γ>1]
+    //
+    // Scalar diagnostics (V_ex, Neff) are computed after BAOAB at the final
+    // s_fict_ position so they are synchronized with the reported lambda.
     double ghatF[3] = {};
     {
       std::vector<double> gf(dim_, 0.0);
@@ -1801,44 +1860,50 @@ public:
       for (unsigned i = 0; i < dim_; ++i) F_explore[i] = fe[i];
     }
 
-    
-    
-    
-    
-    
-    
-    
-    
-    
-    
-    
-    
+    // (F) BAOAB Langevin dynamics for s_fict_.
+    //
+    // Second-order symmetric splitting (Leimkuhler & Matthews 2013):
+    //   B – half kick with current force
+    //   A – half drift
+    //   O – Ornstein-Uhlenbeck thermostat (full dt)
+    //   A – half drift
+    //   B – half kick with force at updated position
+    //
+    // All forces (spring, ABF, exploration) are re-evaluated at the new s_fict_
+    // for the closing half-kick. Since all bias forces come from frozen grids,
+    // these re-evaluations are cheap (grid interpolation only).
     const double halfdt = 0.5 * dt;
     double fmag2 = 0;
 
-    
+    // ── B: half kick (current forces) ──────────────────────────────────────
     for (unsigned i = 0; i < dim_; ++i) {
-      double F_abf   = -ghatF[i];   
+      double F_abf   = -ghatF[i];   // direct NW mean force, no Poisson
       double F_total = springF[i] + F_abf + F_explore[i];
       fmag2 += sq(F_abf + F_explore[i]);
       v_fict_[i] += halfdt * F_total / mass_[i];
     }
 
-    
+    // ── A: half drift ──────────────────────────────────────────────────────
     for (unsigned i = 0; i < dim_; ++i)
       s_fict_[i] += halfdt * v_fict_[i];
 
-    
+    // ── O: Ornstein-Uhlenbeck thermostat (full dt) ─────────────────────────
+    const double c1 = std::exp(-friction_ * dt);
     for (unsigned i = 0; i < dim_; ++i) {
-      double c1 = std::exp(-friction_ * dt);
       double c2 = std::sqrt(kT_ / mass_[i] * (1.0 - c1*c1));
       v_fict_[i] = c1 * v_fict_[i] + c2 * gauss_(rng_);
     }
 
-    
+    // ── A: half drift ──────────────────────────────────────────────────────
     for (unsigned i = 0; i < dim_; ++i) {
       s_fict_[i] += halfdt * v_fict_[i];
-      
+      // Boundary handling (reflecting walls or periodic wrap)
+      if (!std::isfinite(s_fict_[i])) {
+        log.printf("  [FKERNELABF] WARNING: s_fict_[%u] is non-finite (%g); resetting to domain center.\n",
+                   i, s_fict_[i]);
+        s_fict_[i] = 0.5 * (gridMin_[i] + gridMax_[i]);
+        v_fict_[i] = 0.0;
+      }
       if (periodic_[i]) {
         s_fict_[i] = wrapToDomain(i, s_fict_[i]);
       } else {
@@ -1853,8 +1918,8 @@ public:
       }
     }
 
-    
-    
+    // ── B: half kick (forces at updated position) ──────────────────────────
+    // Recompute all forces at new s_fict_ from grids (cheap: just interpolation).
     {
       std::vector<double> gf2(dim_, 0.0);
       interpolateForce(s_fict_, gf2);
@@ -1865,7 +1930,7 @@ public:
         for (unsigned i = 0; i < dim_; ++i) fe2[i] = fev[i];
       }
       for (unsigned i = 0; i < dim_; ++i) {
-        double d2 = periodicDelta(i, s_fict_[i], s[i]);  
+        double d2 = periodicDelta(i, s_fict_[i], s[i]);  // z - lambda_new
         double springF2 = kappa_[i] * d2;
         double F_abf2   = -gf2[i];
         double F_total2 = springF2 + F_abf2 + fe2[i];
@@ -1873,10 +1938,10 @@ public:
       }
     }
 
-    
-    
-    
-    
+    // (G) Post-BAOAB diagnostics at the final s_fict_ position.
+    //
+    // V_ex and Neff are evaluated here (not before BAOAB) so that the
+    // reported scalars are synchronized with the reported lambda position.
     double V_ex = 0.0;
     double Neff = 0.0;
     if (biasFactor_ > 1.0) {
@@ -1903,18 +1968,18 @@ public:
     for (unsigned i = 0; i < dim_; ++i)
       getPntrToComponent(fictNames_[i])->set(s_fict_[i]);
 
-    
+    // (I) Lambda-grid file output (debug: NW mean force on λ)
     if (!lambdaGridFile_.empty() && lambdaGridStride_ > 0 && M_ > 0 && getStep() % lambdaGridStride_ == 0)
       writeGridFile();
 
-    
+    // (J) lambda-kernel dump
     dumpKernelsIfNeeded();
 
-    
+    // (K) CZAR z-kernel file (step-stamped snapshot; never overwritten)
     if (!czarFile_.empty() && czarStride_ > 0 && zM_ > 0 && getStep() % czarStride_ == 0)
       writeCZARFile();
 
-    
+    // (L) Restart state (overwritten in place, no backups)
     if (stateStride_ > 0 && M_ > 0 && getStep() % stateStride_ == 0)
       writeState();
   }
