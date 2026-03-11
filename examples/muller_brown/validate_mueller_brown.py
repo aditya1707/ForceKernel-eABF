@@ -1,32 +1,47 @@
-#!/usr/bin/env python3
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 """
 validate_mueller_brown.py
-=========================
-Compare the CZAR-reconstructed FEL from an FKERNELABF simulation
-against the exact (analytical Boltzmann) reference for the Müller-Brown
-potential.
 
-Run AFTER run_mueller_brown.py has completed. Produces:
-  mb_validation.png   — 4-panel comparison figure
-  mb_validation.txt   — numerical ΔA comparison table
+Validates FKERNELABF on the 2-D Müller-Brown benchmark potential.
 
-Usage
------
-    python validate_mueller_brown.py [--czar mb_czar_kernels.dat] [--grid 80]
+Computes an exact reference FEL (Boltzmann inversion of the analytical potential),
+runs the CZAR integrator on a CZAR kernel file produced during an FKERNELABF run,
+and optionally computes a reweighted FEL from the COLVAR trajectory.  Results are
+compared at the three known Müller-Brown minima (A, B, C) and printed as a ΔA
+table.  A 2×2 validation figure is saved as mb_validation.png.
 
-Options
--------
-    --czar FILE     CZAR kernel file (default: mb_czar_kernels.dat)
-    --grid N        Grid size for CZAR integration (default: 80)
-    --minpop P      Minimum population threshold (default: 1e-5)
-    --temp K        Temperature in K (default: 300)
-    --colvar FILE   COLVAR file for reweighted FEL (default: MB_COLVAR)
+Usage:
+    python validate_mueller_brown.py [--czar <file>] [--grid N] [--temp T]
 """
 
 import argparse, os, sys
 import numpy as np
 
-# ─────────────────────── MB reference ────────────────────────────────────────
+
 
 _A  = np.array([-200., -100., -170.,  15.])
 _a  = np.array([  -1.,   -1.,  -6.5,   0.7])
@@ -49,7 +64,13 @@ MINIMA = {
 
 
 def compute_reference_fel(kT, nx=200, ny=200):
-    """Exact FEL grid via Boltzmann: A(x,y) = -kT ln p(x,y)."""
+    """Compute the exact Boltzmann-inversion FEL on the Müller-Brown potential.
+
+    Evaluates V(x,y) on a fine grid, clips it at 50 kJ/mol to avoid overflow,
+    computes p = exp(-V/kT), and returns FEL = -kT ln(p/p_max).
+
+    Returns xs, ys (1-D coordinate arrays) and FEL (2-D, shape (ny, nx)).
+    """
     xs = np.linspace(-1.6, 1.3, nx)
     ys = np.linspace(-0.3, 2.1, ny)
     X, Y = np.meshgrid(xs, ys)
@@ -60,11 +81,15 @@ def compute_reference_fel(kT, nx=200, ny=200):
     return xs, ys, FEL
 
 
-# ─────────────────────── CZAR integration ────────────────────────────────────
+
 
 def run_czar(czar_file, grid_size, minpop, kT):
-    """
-    Call czar_integrate logic inline (avoids subprocess).
+    """Run the CZAR integrator on a kernel file and return the 2-D FEL.
+
+    Imports czar_integrate_improved as 'ci', evaluates the gradient on a fixed
+    Müller-Brown domain grid, integrates via Poisson solver, and masks
+    unsampled regions.
+
     Returns (xs, ys, A_czar, mask) or None on failure.
     """
     try:
@@ -74,7 +99,7 @@ def run_czar(czar_file, grid_size, minpop, kT):
         print("WARNING: czar_integrate.py not importable — skipping CZAR overlay")
         return None
 
-    # Parse kernels — function is parse_czar_file, returns (meta, kernels)
+    
     meta, kernels = ci.parse_czar_file(czar_file)
     if not kernels:
         print("WARNING: no kernels parsed"); return None
@@ -83,7 +108,7 @@ def run_czar(czar_file, grid_size, minpop, kT):
     if dim != 2:
         print(f"WARNING: expected 2D, got {dim}D"); return None
 
-    # Build grid over the MB domain
+    
     grid_ranges = [(-1.6, 1.3), (-0.3, 2.1)]
     coords = [np.linspace(lo, hi, grid_size) for (lo, hi) in grid_ranges]
     periodic = np.array([False, False])
@@ -91,32 +116,34 @@ def run_czar(czar_file, grid_size, minpop, kT):
 
     ptilde, czar_grad = ci.czar_on_grid(coords, periodic, kernels, kT, nsigma)
 
-    # Mask by population
+    
     mask = ptilde >= minpop * ptilde.max()
 
-    # Integrate via Poisson
+    
     A = ci.poisson_integrate(czar_grad, coords, periodic)
     A = np.where(mask, A, np.nan)
     A -= np.nanmin(A)
 
-    # Transpose to (ny, nx) so contourf(meshgrid(xs,ys), Z) works correctly.
-    # czar_on_grid returns shape (N_coords0, N_coords1) = (nx, ny).
+    
+    
     return coords[0], coords[1], A.T, mask.T
 
 
-# ─────────────────────── reweighted FEL from COLVAR ──────────────────────────
+
 
 def reweighted_fel_from_colvar(colvar_path, kT, nx=80, ny=80):
-    """
-    Compute reweighted FEL from COLVAR file using exp(+V/kT) weights.
-    Returns (xs, ys, FEL) or None.
+    """Compute an exp(+V/kT)-reweighted FEL from a PLUMED COLVAR file.
+
+    Reads cv.x, cv.y, and bias columns.  Weights each frame by exp(bias/kT),
+    then estimates the unbiased density via Gaussian KDE on the Müller-Brown
+    domain grid.  Returns (xs, ys, FEL) or None on failure.
     """
     try:
         fields, data, _ = _parse_colvar_simple(colvar_path)
     except Exception as e:
         print(f"WARNING: could not parse COLVAR: {e}"); return None
 
-    # Find x, y, bias columns
+    
     def fc(pat):
         for i, f in enumerate(fields):
             if pat.lower() in f.lower(): return i
@@ -130,7 +157,7 @@ def reweighted_fel_from_colvar(colvar_path, kT, nx=80, ny=80):
 
     xs = np.linspace(-1.6, 1.3, nx)
     ys = np.linspace(-0.3, 2.1, ny)
-    bw = 0.08   # nm — appropriate for this domain size
+    bw = 0.08   
 
     if ib is not None:
         V = data[:, ib]
@@ -139,7 +166,7 @@ def reweighted_fel_from_colvar(colvar_path, kT, nx=80, ny=80):
     else:
         weights = np.ones(len(x)) / len(x)
 
-    # Weighted KDE
+    
     G0, G1 = np.meshgrid(xs, ys)
     grid_pts = np.vstack([G0.ravel(), G1.ravel()])
     inv2bw2 = 1.0 / (2.0 * bw**2)
@@ -169,16 +196,22 @@ def _parse_colvar_simple(path, stride=5):
     return fields, np.array(rows), {}
 
 
-# ─────────────────────── ΔA comparison ───────────────────────────────────────
+
 
 def extract_minimum_values(xs, ys, A_grid, mask=None):
-    """Find FEL value at each known minimum location."""
+    """Look up the FEL value at each known Müller-Brown minimum (A, B, C).
+
+    If a minimum falls on a masked (unsampled) grid point, searches the
+    surrounding radius for the nearest sampled point.
+
+    Returns a dict {name: A_value}.
+    """
     vals = {}
     for name, (mx, my) in MINIMA.items():
         ix = np.argmin(np.abs(xs - mx))
         iy = np.argmin(np.abs(ys - my))
         if mask is not None and not mask[iy, ix]:
-            # Search nearby for sampled point
+            
             found = False
             for r in range(1, 10):
                 for di in range(-r, r+1):
@@ -196,6 +229,10 @@ def extract_minimum_values(xs, ys, A_grid, mask=None):
 
 
 def print_delta_A_table(label, vals, kT, ref_vals=None):
+    """Print a formatted table of FEL values and ΔA differences at the three minima.
+
+    If ref_vals is provided, also prints the error relative to the reference.
+    """
     names = list(MINIMA.keys())
     print(f"\n{label}")
     print(f"  {'Min':4s}  {'A (kJ/mol)':12s}  {'A/kT':6s}", end='')
@@ -224,9 +261,10 @@ def print_delta_A_table(label, vals, kT, ref_vals=None):
             print(line)
 
 
-# ─────────────────────── main ────────────────────────────────────────────────
+
 
 def main():
+    """Parse arguments and run the full Müller-Brown validation pipeline."""
     parser = argparse.ArgumentParser()
     parser.add_argument('--czar',    default='mb_czar_kernels_00200000.dat')
     parser.add_argument('--grid',    type=int,   default=80)
@@ -240,14 +278,14 @@ def main():
     print(f"Müller-Brown FKERNELABF validation")
     print(f"  kT = {kT:.4f} kJ/mol  (T = {args.temp} K)")
 
-    # ── Reference FEL ─────────────────────────────────────────────────────────
+    
     print("\nComputing reference FEL (exact Boltzmann)...")
     xs_ref, ys_ref, A_ref = compute_reference_fel(kT, nx=200, ny=200)
     A_ref -= np.nanmin(A_ref)
     ref_vals = extract_minimum_values(xs_ref, ys_ref, A_ref)
     print_delta_A_table("Reference (exact Boltzmann)", ref_vals, kT)
 
-    # ── CZAR FEL ──────────────────────────────────────────────────────────────
+    
     czar_result = None
     if os.path.exists(args.czar):
         print(f"Running CZAR integration on {args.czar}...")
@@ -261,7 +299,7 @@ def main():
     else:
         print(f"  {args.czar} not found — skipping CZAR")
 
-    # ── Reweighted FEL ────────────────────────────────────────────────────────
+    
     rw_result = None
     if os.path.exists(args.colvar):
         print(f"Computing reweighted FEL from {args.colvar}...")
@@ -274,7 +312,7 @@ def main():
     else:
         print(f"  {args.colvar} not found — skipping reweighted FEL")
 
-    # ── Plots ─────────────────────────────────────────────────────────────────
+    
     try:
         import matplotlib
         matplotlib.use('Agg')
@@ -297,7 +335,7 @@ def main():
                 ax.annotate(name, (mx+0.04, my+0.06), color='red',
                             fontsize=11, fontweight='bold')
 
-        # Panel 0: Reference
+        
         ax = next(axes)
         cs = ax.contourf(X_ref, Y_ref, A_ref_plot, levels=levels, cmap=cmap, extend='max')
         ax.contour(X_ref, Y_ref, A_ref_plot, levels=levels[::4],
@@ -307,7 +345,7 @@ def main():
         ax.set_xlabel('x (nm)'); ax.set_ylabel('y (nm)')
         ax.set_title('Reference FEL (exact Boltzmann)')
 
-        # Panel 1: CZAR
+        
         ax = next(axes)
         if czar_result:
             xs_c, ys_c, A_czar, mask_c = czar_result
@@ -325,16 +363,16 @@ def main():
             ax.set_title('CZAR FEL')
         ax.set_xlabel('x (nm)'); ax.set_ylabel('y (nm)')
 
-        # Panel 2: Difference (CZAR - Reference) interpolated to reference grid
+        
         ax = next(axes)
         if czar_result:
             from scipy.interpolate import RegularGridInterpolator
-            # A_czar is already transposed to (ny, nx), so axes are (ys_c, xs_c)
+            
             czar_interp = RegularGridInterpolator(
                 (ys_c, xs_c), np.where(mask_c, A_czar, np.nan),
                 method='linear', bounds_error=False, fill_value=np.nan)
-            # ref grid: X_ref[j,i]=xs_ref[i], Y_ref[j,i]=ys_ref[j]
-            # interpolator expects (y, x) pairs
+            
+            
             pts = np.column_stack([Y_ref.ravel(), X_ref.ravel()])
             A_czar_on_ref = czar_interp(pts).reshape(X_ref.shape)
             diff = A_czar_on_ref - A_ref_plot
@@ -352,7 +390,7 @@ def main():
             ax.set_title('CZAR − Reference')
         ax.set_xlabel('x (nm)'); ax.set_ylabel('y (nm)')
 
-        # Panel 3: Reweighted FEL or basin occupancy
+        
         ax = next(axes)
         if rw_result:
             xs_rw, ys_rw, A_rw_raw = rw_result
@@ -378,7 +416,7 @@ def main():
         print(f"WARNING: plotting failed: {e}")
         import traceback; traceback.print_exc()
 
-    # ── Write text table ───────────────────────────────────────────────────────
+    
     with open('mb_validation.txt', 'w') as f:
         f.write("Müller-Brown FKERNELABF Validation\n")
         f.write("="*60 + "\n\n")

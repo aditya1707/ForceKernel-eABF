@@ -1,64 +1,83 @@
-#!/usr/bin/env python3
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 """
 fkabf_analysis.py
-=================
-Analysis and diagnostic plots for FKERNELABF v3+ simulations.
 
-Reads the PLUMED COLVAR file (and optionally kernel dump files) and
-produces a multi-panel PDF report covering:
+Post-processing analysis and report generation for FKERNELABF runs.
 
-  Panel 1  — Real vs fictitious CV time series (one subplot per CV)
-  Panel 2  — z − λ coupling gap time series + histogram per CV
-  Panel 3  — Spring force magnitude time series
-  Panel 4  — Bias amplitude (Vamp), exploration potential V_ex over time
-  Panel 5  — Kernel counts (M, zM) and Silverman sigma over time
-  Panel 6  — 2D FEL from binned −V(λ) + biased density  [dims 1–2]
-  Panel 7  — Kernel scatter: center positions coloured by |mu|  [from kernels]
-  Panel 8  — Kernel Nk distribution, |mu|, sigma, and Nk-vs-|mu| correlation
-  Panel 9  — Kernel snapshot evolution over time
+Reads a PLUMED COLVAR file and, optionally, FKERNELABF kernel snapshot files,
+then produces a multi-page PDF diagnostic report covering:
 
-The authoritative free energy surface comes from czar_integrate.py.
-The binned −V(λ) FEL (≈ A(z) at convergence) is a quick diagnostic.
+  - CV time series and histograms (per dimension)
+  - Fictitious-particle gap (z_fict - z_real) traces
+  - Kernel count, effective sample size (Neff), bandwidth (sigma) evolution
+  - Kernel mean-force (mu) magnitude distribution vs time
+  - Bias energy (V_amp) and kernel amplitude (W_amp) traces
+  - 2-D density and FEL surfaces (for 2-D CV runs)
+  - Kernel scatter / ellipse overlays at selected time points
 
-Usage
------
-    python fkabf_analysis.py --colvar COLVAR [OPTIONS]
-
-Options
--------
-    --colvar FILE          PLUMED COLVAR/output file  (required)
-    --kernels PATTERN      Kernel dump file(s). Accepts:
-                             - a single file (legacy appended format)
-                             - a glob pattern, e.g. "fk.kernels_*.dat"
-                             - a directory (auto-discovers *.kernels_*.dat)
-    --output FILE          Output PDF  (default: fkabf_report.pdf)
-    --stride N             Thin COLVAR rows by factor N for speed  (default: 1)
-    --kappa V [V ...]      κ values per CV for coupling-gap units  (default: 1.0)
-    --temp K               Temperature in K for kT annotation  (default: 300)
-    --cvnames N [N...]     Override CV names  (e.g. phi psi)
-    --biasfactor V         BIASFACTOR γ from the simulation.  If γ > 1,
-                           reweighting uses A(s) = γ·(-kT ln P) instead of
-                           exp(+V/kT) weights.  (default: 1.0 = standard ABF)
-    --dt PS                MD timestep in ps for time axis  (default: 0.002)
-    --show                 Display figure interactively instead of saving
-
-Examples
---------
-    # With density-based exploration (γ=6)
-    python fkabf_analysis.py --colvar COLVAR --kernels "fk.kernels_*.dat" \\
-        --kappa 3000 3000 --cvnames phi psi --temp 300 --biasfactor 6
-
-    # Auto-discover kernel files in a directory
-    python fkabf_analysis.py --colvar COLVAR --kernels ./output/ \\
-        --kappa 3000 3000 --cvnames phi psi --biasfactor 4
-
-    # Pure ABF (no exploration, biasfactor=1)
-    python fkabf_analysis.py --colvar COLVAR --kernels "fk.kernels_*.dat"
-
-    # No kernel files
-    python fkabf_analysis.py --colvar COLVAR --stride 10 --output report.pdf
+Usage:
+    python fkabf_analysis.py --colvar COLVAR [--kernels <file_or_dir>] [options]
 """
-
 import argparse
 import glob
 import os
@@ -70,13 +89,19 @@ import numpy as np
 warnings.filterwarnings('ignore')
 
 
-# ─────────────────────── file parsers ────────────────────────────────────────
+
 
 def parse_colvar(path, stride=1):
-    """
-    Parse a PLUMED COLVAR file.
-    Returns (fields, data, periodic_info) where periodic_info is a dict
-    {cv_name: (lo, hi)} for CVs whose SET min_/max_ lines are in the header.
+    """Parse a PLUMED COLVAR file produced by FKERNELABF.
+
+    Reads '#! FIELDS' column headers and '#! SET min_*/max_*' periodic-boundary
+    annotations, then loads all numeric data rows (strided by 'stride').
+
+    Returns
+    -------
+    fields       : list of str, column names
+    data         : (N, ncols) float array
+    periodic_info: dict mapping CV name -> (lo, hi) for periodic CVs
     """
     fields = None
     rows = []
@@ -115,7 +140,7 @@ def parse_colvar(path, stride=1):
             if len(vals) == len(fields):
                 rows.append(vals)
 
-    # Build periodic_info from matched min_xxx / max_xxx pairs
+    
     periodic_info = {}
     for key, lo in set_vals.items():
         if key.startswith('min_'):
@@ -135,22 +160,20 @@ def parse_colvar(path, stride=1):
 
 
 def _parse_single_kernel_file(path):
-    """
-    Parse ONE kernel dump file (either a standalone step-stamped file
-    or one snapshot block from a legacy appended file).
+    """Parse one FKERNELABF kernel snapshot file.
 
-    Handles all known formats:
-      v2+: k  Nk  center×d  mu×d  sigma×d  |mu|  wt       (no boost column)
-      legacy:  k  Nk  center×d  mu×d  sigma×d  |mu|  boost  wt
+    The file may contain multiple snapshot blocks delimited by comment lines
+    containing 'snapshot step=N M=N totalN=N'.  Each block has:
+      - A metadata line with neff(Silverman), sigma, Vamp, <lambda>.
+      - A column-header comment listing CV names (c_<name>).
+      - One data line per kernel: idx Nk center[d] mu[d] sigma[d] mu_mag wt.
 
-    Note: the snapshot header no longer emits <lambda>=... because lambdaMax
-    is now a fixed constant rather than a convergence diagnostic.  lambda_mean
-    will be None for v2+ files; callers should treat None as expected, not missing.
-
-    Returns list of snapshot dicts and a list of CV names.
-    Each snapshot dict contains:
-      step, M, totalN, neff, sigma, vamp, lambda_mean,
-      kernels: list of dicts {k, Nk, center, mu, sigma, mu_mag, wt}
+    Returns
+    -------
+    snapshots : list of dicts, one per snapshot block, each with keys:
+                'step', 'M', 'totalN', 'neff', 'sigma', 'vamp',
+                'lambda_mean', 'kernels' (list of per-kernel dicts).
+    cvnames   : list of CV name strings extracted from the header.
     """
     snapshots = []
     current = None
@@ -161,7 +184,7 @@ def _parse_single_kernel_file(path):
         for line in fh:
             line = line.rstrip()
 
-            # Snapshot header (case-insensitive; all versions write "snapshot" or "Snapshot")
+            
             if 'snapshot' in line.lower() and 'step=' in line:
                 if current is not None:
                     snapshots.append(current)
@@ -180,7 +203,7 @@ def _parse_single_kernel_file(path):
             if current is None:
                 continue
 
-            # Second header line: neff, sigma, Vamp, lambda
+            
             if 'neff(Silverman)' in line:
                 m = re.search(r'neff\(Silverman\)=\s*([0-9.eE+\-]+)', line)
                 if m: current['neff'] = float(m.group(1))
@@ -188,13 +211,13 @@ def _parse_single_kernel_file(path):
                 if m: current['sigma'] = [float(x) for x in m.group(1).split(',')]
                 m = re.search(r'Vamp=\s*([0-9.eE+\-]+)', line)
                 if m: current['vamp'] = float(m.group(1))
-                # Note: <lambda>= line removed (lambdaMax is a fixed constant).
-                # Still parsed here so legacy files continue to work.
+                
+                
                 m = re.search(r'<lambda>=\s*([0-9.eE+\-]+)', line)
                 if m: current['lambda_mean'] = float(m.group(1))
                 continue
 
-            # Column header line — extract CV names and detect format
+            
             if line.lstrip().startswith('#') and 'c_' in line:
                 parts = line.lstrip('# ').split()
                 cvnames = []
@@ -204,7 +227,7 @@ def _parse_single_kernel_file(path):
                 n_center = len(cvnames)
                 continue
 
-            # Data line — starts with whitespace + integer index
+            
             if line and not line.lstrip().startswith('#') and line.strip():
                 parts = line.split()
                 if not parts:
@@ -216,9 +239,9 @@ def _parse_single_kernel_file(path):
 
                 d = n_center if n_center else 1
 
-                # v2+ format: k  Nk  center×d  mu×d  sigma×d  |mu|  wt
+                
                 expected_v2 = 1 + 1 + d + d + d + 1 + 1
-                # Legacy format: k  Nk  center×d  mu×d  sigma×d  |mu|  boost  wt
+                
                 expected_legacy = expected_v2 + 1
 
                 try:
@@ -229,10 +252,10 @@ def _parse_single_kernel_file(path):
                     mu_mag = float(parts[2+3*d])
 
                     if len(parts) >= expected_legacy:
-                        # Legacy format: skip the boost column (index 2+3*d+1)
+                        
                         wt = float(parts[2+3*d+2])
                     elif len(parts) >= expected_v2:
-                        # v2+ format: no boost column
+                        
                         wt = float(parts[2+3*d+1])
                     else:
                         continue
@@ -251,19 +274,25 @@ def _parse_single_kernel_file(path):
 
 
 def load_kernel_snapshots(kernels_arg):
-    """
-    Discover and load kernel snapshot files from a path argument.
+    """Load kernel snapshots from a file, glob pattern, or directory.
 
-    kernels_arg can be:
-      - a single file path             (legacy appended file OR single file)
-      - a glob pattern                 (e.g. "fk.kernels_*.dat")
-      - a directory                    (auto-discovers *kernels*.dat files)
+    Accepts:
+      - A single .dat file path.
+      - A glob pattern (containing * or ?).
+      - A directory (searches for *kernels_*.dat inside).
 
-    Returns (snapshots_list, cvnames) sorted by step.
+    Files are sorted by step number extracted from the filename.  Duplicate
+    steps (e.g., from overlapping snapshot files) are deduplicated, keeping
+    the last occurrence.
+
+    Returns
+    -------
+    snapshots : list of snapshot dicts (sorted by step), same format as
+                _parse_single_kernel_file.
+    cvnames   : list of CV name strings.
     """
-    # Determine the list of files to parse
     if os.path.isdir(kernels_arg):
-        # Directory: discover kernel files
+        
         patterns = [
             os.path.join(kernels_arg, '*kernels_*.dat'),
             os.path.join(kernels_arg, '*kernels_*.dat.gz'),
@@ -275,25 +304,25 @@ def load_kernel_snapshots(kernels_arg):
             print(f"  WARNING: no kernel files found in directory {kernels_arg}")
             return [], []
     elif '*' in kernels_arg or '?' in kernels_arg:
-        # Glob pattern
+        
         files = glob.glob(kernels_arg)
         if not files:
             print(f"  WARNING: no files matched pattern {kernels_arg}")
             return [], []
     elif os.path.isfile(kernels_arg):
-        # Single file (legacy appended or single snapshot)
+        
         files = [kernels_arg]
     else:
         print(f"  WARNING: kernel path not found: {kernels_arg}")
         return [], []
 
-    # Sort files by the step number embedded in the filename (if present)
+    
     def _extract_step(path):
         m = re.search(r'_(\d{6,})\.dat', os.path.basename(path))
         return int(m.group(1)) if m else 0
     files.sort(key=_extract_step)
 
-    # Parse all files and collect snapshots
+    
     all_snapshots = []
     cvnames = []
     for f in files:
@@ -302,10 +331,10 @@ def load_kernel_snapshots(kernels_arg):
         if cvn and not cvnames:
             cvnames = cvn
 
-    # Sort snapshots by step (handles mixed ordering)
+    
     all_snapshots.sort(key=lambda s: s['step'])
 
-    # Deduplicate by step (keep latest if duplicated)
+    
     seen_steps = {}
     for s in all_snapshots:
         seen_steps[s['step']] = s
@@ -317,10 +346,13 @@ def load_kernel_snapshots(kernels_arg):
     return deduped, cvnames
 
 
-# ─────────────────────── column finders ──────────────────────────────────────
+
 
 def find_col(fields, patterns):
-    """Return index of first field matching any pattern (case-insensitive substring)."""
+    """Return the index of the first field whose name contains any pattern (case-insensitive).
+
+    Returns None if no match is found.
+    """
     for pat in patterns:
         for i, f in enumerate(fields):
             if pat.lower() in f.lower():
@@ -329,7 +361,7 @@ def find_col(fields, patterns):
 
 
 def find_cols(fields, patterns):
-    """Return list of indices matching any pattern."""
+    """Return indices of all fields whose names contain any of patterns (case-insensitive)."""
     result = []
     for i, f in enumerate(fields):
         if any(p.lower() in f.lower() for p in patterns):
@@ -337,22 +369,44 @@ def find_cols(fields, patterns):
     return result
 
 
-# ─────────────────────── plotting ────────────────────────────────────────────
+
 
 def make_report(fields, data, snapshots, cvnames_kern, args, periodic_info=None):
+    """Generate the full multi-page PDF diagnostic report.
+
+    Produces a PdfPages document containing all analysis figures.  Each figure
+    is saved into the PDF and then closed to manage memory.
+
+    The report includes (depending on available data):
+      - Time-series panels for each CV (real and fictitious particle)
+      - Fictitious-particle gap traces and histograms
+      - Kernel-count, Neff, sigma, and mu_mag evolution
+      - V_amp and W_amp bias traces
+      - 2-D FEL and density panels (for 2-D FKERNELABF runs)
+      - Kernel scatter / ellipse overlays at selected simulation stages
+
+    Parameters
+    ----------
+    fields        : list of column names from parse_colvar
+    data          : (N, ncols) float array of COLVAR data
+    snapshots     : list of kernel snapshot dicts from load_kernel_snapshots
+    cvnames_kern  : list of CV names from the kernel file
+    args          : parsed argparse.Namespace with all run settings
+    periodic_info : dict of periodic CV ranges {cv_name: (lo, hi)}
+    """
     import matplotlib
     matplotlib.use('Agg' if not args.show else 'TkAgg')
     import matplotlib.pyplot as plt
     import matplotlib.gridspec as gridspec
     from matplotlib.backends.backend_pdf import PdfPages
 
-    kB = 0.008314462618  # kJ/mol/K
+    kB = 0.008314462618  
     kT = kB * args.temp
     if periodic_info is None:
         periodic_info = {}
 
     def periodic_gap(z_arr, lam_arr, cv_name):
-        """Minimum-image difference z - lambda for periodic CVs."""
+        
         raw = z_arr - lam_arr
         if cv_name in periodic_info:
             lo, hi = periodic_info[cv_name]
@@ -360,31 +414,31 @@ def make_report(fields, data, snapshots, cvnames_kern, args, periodic_info=None)
             raw = raw - period * np.round(raw / period)
         return raw
 
-    # ── identify columns ──────────────────────────────────────────────────────
+    
     time_col = find_col(fields, ['time'])
     time = data[:, time_col] if time_col is not None else np.arange(len(data)) * args.dt
 
-    # Real CVs: anything that looks like phi/psi or generic arg names,
-    # excluding _fict, bias., force2, lambda, nkernels, vamp, wamp, neff, sigma, nlker
+    
+    
     exclude = ['fict','bias','force2','lambda','nkernels','nzkernels',
                'vamp','wamp','vbias','alpha','neff','sigma','nlker','time']
     cv_cols = [i for i,f in enumerate(fields)
                if not any(e in f.lower() for e in exclude)
                and i != time_col]
 
-    # Fictitious CVs: *_fict
+    
     fict_cols = [i for i,f in enumerate(fields) if 'fict' in f.lower()]
 
-    # Pair real with fict by CV name.
-    # Handles both plain 'phi_fict' and prefixed 'fk.phi_fict' column names.
-    cv_pairs = []  # list of (cv_name, real_col, fict_col)
+    
+    
+    cv_pairs = []  
     for rc in cv_cols:
         cv_name = fields[rc]
         fc = next((i for i, f in enumerate(fields)
                    if 'fict' in f.lower() and cv_name.lower() in f.lower()), None)
         cv_pairs.append((cv_name, rc, fc))
 
-    # Use user-supplied names if given
+    
     if args.cvnames and len(args.cvnames) == len(cv_pairs):
         cv_pairs = [(args.cvnames[i], cv_pairs[i][1], cv_pairs[i][2])
                     for i in range(len(cv_pairs))]
@@ -392,11 +446,11 @@ def make_report(fields, data, snapshots, cvnames_kern, args, periodic_info=None)
     ndim = len(cv_pairs)
     kappa_given = bool(args.kappa and len(args.kappa) >= 1)
     kappas = list(args.kappa) if kappa_given else [None] * ndim
-    # Extend to ndim if only one value given
+    
     if kappa_given and len(kappas) < ndim:
         kappas = (kappas * ndim)[:ndim]
 
-    # Scalar diagnostic columns
+    
     vamp_col   = find_col(fields, ['vamp'])
     wamp_col   = find_col(fields, ['wamp'])
     vbias_col  = find_col(fields, ['vbias'])
@@ -406,15 +460,15 @@ def make_report(fields, data, snapshots, cvnames_kern, args, periodic_info=None)
     neff_col   = find_col(fields, ['neff'])
     force2_col = find_col(fields, ['force2'])
 
-    # ── figure layout ─────────────────────────────────────────────────────────
+    
     have_kernels = len(snapshots) > 0
 
     pdf_path = args.output
     with PdfPages(pdf_path) as pdf:
 
-        # ══════════════════════════════════════════════════════════════════════
-        # PAGE 1 — Real vs fictitious CV + coupling diagnostics
-        # ══════════════════════════════════════════════════════════════════════
+        
+        
+        
         fig = plt.figure(figsize=(14, 4 * ndim))
         gs  = gridspec.GridSpec(ndim, 3, figure=fig, wspace=0.35, hspace=0.45)
         fig.suptitle('Real vs Fictitious CV & Coupling Quality', fontsize=13, y=1.01)
@@ -424,7 +478,7 @@ def make_report(fields, data, snapshots, cvnames_kern, args, periodic_info=None)
             lam = data[:, fc] if fc is not None else None
             gap = periodic_gap(z, lam, cvn) if lam is not None else None
 
-            # Time series
+            
             ax = fig.add_subplot(gs[di, 0:2])
             ax.scatter(time[::10], z[::10],   s=0.5, alpha=0.8, label=f'z ({cvn})',       color='steelblue')
             if lam is not None:
@@ -434,7 +488,7 @@ def make_report(fields, data, snapshots, cvnames_kern, args, periodic_info=None)
             ax.set_title(f'CV: {cvn}')
             ax.legend(fontsize=8, loc='upper right')
 
-            # Gap histogram
+            
             ax2 = fig.add_subplot(gs[di, 2])
             if gap is not None:
                 kap = kappas[di]
@@ -483,23 +537,23 @@ def make_report(fields, data, snapshots, cvnames_kern, args, periodic_info=None)
         pdf.savefig(fig, bbox_inches='tight')
         plt.close(fig)
 
-        # ══════════════════════════════════════════════════════════════════════
-        # PAGE 2 — Scalar diagnostics time series
-        # ══════════════════════════════════════════════════════════════════════
-        # v3+: wamp = V_ex (exploration potential), alpha is always 0.
+        
+        
+        
+        
         gamma = args.biasfactor
 
-        # V_ex time series from wamp column
+        
         wamp_ts = data[:, wamp_col] if wamp_col is not None else None
 
-        # ── Standard scalar rows ──────────────────────────────────────────────
+        
         diag_items = []
         if vamp_col   is not None: diag_items.append(('V(λ) grid amplitude Vamp (kJ/mol)', vamp_col,   'darkorange'))
         if neff_col   is not None: diag_items.append(('Neff at λ position',                neff_col,   'seagreen'))
         if force2_col is not None: diag_items.append(('Bias |F|² (kJ/mol/rad)²',           force2_col, 'crimson'))
         if sig_col    is not None: diag_items.append(('Silverman σ (dim 0)',                sig_col,    'purple'))
 
-        # Exploration row: V(λ) + V_ex on one panel (same kJ/mol scale).
+        
         have_explore_diag = (wamp_ts is not None or vbias_col is not None)
         n_explore_rows = 1 if (gamma > 1.0 and have_explore_diag) else (
                          1 if (vbias_col is not None) else 0)
@@ -515,7 +569,7 @@ def make_report(fields, data, snapshots, cvnames_kern, args, periodic_info=None)
             def plot_ts(ax, y, color, label=None):
                 ax.plot(time, y, lw=0.6, color=color, alpha=0.85, label=label)
 
-            # Standard rows
+            
             for ax, (label, col, color) in zip(axes, diag_items):
                 plot_ts(ax, data[:, col], color)
                 ax.set_ylabel(label, fontsize=9)
@@ -524,7 +578,7 @@ def make_report(fields, data, snapshots, cvnames_kern, args, periodic_info=None)
 
             row = len(diag_items)
 
-            # Exploration panel: V(λ) and V_ex on same kJ/mol axis.
+            
             if have_explore_diag and n_explore_rows >= 1:
                 ax = axes[row]
                 if vbias_col is not None:
@@ -540,9 +594,9 @@ def make_report(fields, data, snapshots, cvnames_kern, args, periodic_info=None)
             pdf.savefig(fig, bbox_inches='tight')
             plt.close(fig)
 
-        # ══════════════════════════════════════════════════════════════════════
-        # PAGE 3 — Kernel count + sigma
-        # ══════════════════════════════════════════════════════════════════════
+        
+        
+        
         if nker_col is not None or nzker_col is not None or sig_col is not None:
             fig, axes = plt.subplots(2, 1, figsize=(14, 7), sharex=True)
             fig.suptitle('Kernel Population & Bandwidth', fontsize=13)
@@ -574,14 +628,14 @@ def make_report(fields, data, snapshots, cvnames_kern, args, periodic_info=None)
             pdf.savefig(fig, bbox_inches='tight')
             plt.close(fig)
 
-        # ══════════════════════════════════════════════════════════════════════
-        # PAGE 4 — 2D FEL from binned −V(λ) + biased density
-        # ══════════════════════════════════════════════════════════════════════
-        # At convergence, −∇V cancels ∇A, so V ≈ −A + const.
-        # Binning −fk.vbias by (z₀, z₁) gives A(z) directly.
-        # With tight coupling (κ large), λ ≈ z, so this works on the real CVs.
-        # Empty bins are filled by periodic nearest-neighbor interpolation,
-        # then a light Gaussian smooth removes bin noise.
+        
+        
+        
+        
+        
+        
+        
+        
         if ndim >= 2:
             z0 = data[:, cv_pairs[0][1]]
             z1 = data[:, cv_pairs[1][1]]
@@ -603,7 +657,7 @@ def make_report(fields, data, snapshots, cvnames_kern, args, periodic_info=None)
             dx0 = (hi0 - lo0) / n_bin
             dx1 = (hi1 - lo1) / n_bin
 
-            # Helper for periodic gap-filling (used by both FEL and density panels)
+            
             def _nanmean(vals):
                 f = vals[np.isfinite(vals)]
                 return np.mean(f) if len(f) > 0 else np.nan
@@ -618,12 +672,12 @@ def make_report(fields, data, snapshots, cvnames_kern, args, periodic_info=None)
                 for t in range(len(z0)):
                     i = min(max(int((z0[t] - lo0) / dx0), 0), n_bin - 1)
                     j = min(max(int((z1[t] - lo1) / dx1), 0), n_bin - 1)
-                    sum_v[i, j] += -vb[t]  # negate: V ≈ −A, so −V ≈ A
+                    sum_v[i, j] += -vb[t]  
                     count_v[i, j] += 1
 
                 raw = np.where(count_v > 0, sum_v / count_v, np.nan)
 
-                # Fill empty bins via periodic nearest-neighbor, then smooth
+                
                 try:
                     from scipy.ndimage import generic_filter, gaussian_filter
                     raw_pad = np.tile(raw, (3, 3))
@@ -640,11 +694,11 @@ def make_report(fields, data, snapshots, cvnames_kern, args, periodic_info=None)
                     FEL_smooth = smoothed[n_bin:2*n_bin, n_bin:2*n_bin]
                     FEL_smooth -= FEL_smooth.min()
                 except ImportError:
-                    # No scipy: just use raw with NaN
+                    
                     FEL_smooth = raw.copy()
                     FEL_smooth -= np.nanmin(FEL_smooth)
 
-            # Biased density with smoothing
+            
             h, _, _ = np.histogram2d(z0, z1, bins=n_bin,
                                      range=[[lo0, hi0], [lo1, hi1]])
             h_raw = np.where(h > 0, h, np.nan)
@@ -667,12 +721,12 @@ def make_report(fields, data, snapshots, cvnames_kern, args, periodic_info=None)
             except ImportError:
                 FEL_biased = FEL_biased_raw
 
-            # ── Plot ─────────────────────────────────────────────────────
+            
             ncols = 3 if FEL_smooth is not None else 2
             fig, axes = plt.subplots(1, ncols, figsize=(5.5 * ncols, 5))
             fig.suptitle('2D Free Energy Surface', fontsize=13)
 
-            # Panel A: biased density
+            
             ax = axes[0]
             vmax = min(40.0, float(np.nanpercentile(
                 FEL_biased[np.isfinite(FEL_biased)], 98)))
@@ -687,7 +741,7 @@ def make_report(fields, data, snapshots, cvnames_kern, args, periodic_info=None)
             ax.set_title('Biased sampling −kT ln P(z)')
 
             if FEL_smooth is not None:
-                # Panel B: smoothed −V(λ) FEL
+                
                 ax = axes[1]
                 finite_d = FEL_smooth[np.isfinite(FEL_smooth)]
                 vmax_d = min(80.0, float(np.nanpercentile(finite_d, 95)))
@@ -701,7 +755,7 @@ def make_report(fields, data, snapshots, cvnames_kern, args, periodic_info=None)
                 ax.set_ylabel(f'{cv0_name} (rad)')
                 ax.set_title('FEL from −V(λ)\n(≈ A(z) at convergence)')
 
-                # Panel C: hexbin for coverage
+                
                 ax = axes[2]
                 hb = ax.hexbin(z0, z1, gridsize=60, cmap='Blues', mincnt=1)
                 plt.colorbar(hb, ax=ax, label='counts')
@@ -720,9 +774,9 @@ def make_report(fields, data, snapshots, cvnames_kern, args, periodic_info=None)
             pdf.savefig(fig, bbox_inches='tight')
             plt.close(fig)
 
-        # ══════════════════════════════════════════════════════════════════════
-        # PAGE 5 — Coupling gap time series
-        # ══════════════════════════════════════════════════════════════════════
+        
+        
+        
         gap_pairs = [(cvn, rc, fc) for cvn,rc,fc in cv_pairs if fc is not None]
         if gap_pairs:
             fig, axes = plt.subplots(len(gap_pairs), 1,
@@ -754,9 +808,9 @@ def make_report(fields, data, snapshots, cvnames_kern, args, periodic_info=None)
             pdf.savefig(fig, bbox_inches='tight')
             plt.close(fig)
 
-        # ══════════════════════════════════════════════════════════════════════
-        # PAGES 6–8 — Kernel analysis (only if kernel files supplied)
-        # ══════════════════════════════════════════════════════════════════════
+        
+        
+        
         if have_kernels:
             last = snapshots[-1]
             kerns = last['kernels']
@@ -768,13 +822,13 @@ def make_report(fields, data, snapshots, cvnames_kern, args, periodic_info=None)
                 Nks      = np.array([k['Nk']     for k in kerns])
                 mu_mags  = np.array([k['mu_mag'] for k in kerns])
                 wts      = np.array([k['wt']     for k in kerns])
-                centers  = np.array([k['center'] for k in kerns])  # (n_kern, d)
-                sigmas   = np.array([k['sigma']  for k in kerns])  # (n_kern, d)
+                centers  = np.array([k['center'] for k in kerns])  
+                sigmas   = np.array([k['sigma']  for k in kerns])  
 
-                # PAGE 6 — Kernel positions with true spatial extent
-                # Each kernel is drawn as an ellipse with width=2σ₀, height=2σ₁
-                # in data coordinates (radians).  This shows the actual NW
-                # regression footprint of each kernel on the CV axes.
+                
+                
+                
+                
                 from matplotlib.collections import EllipseCollection
                 from matplotlib.cm import ScalarMappable
                 from matplotlib.colors import Normalize
@@ -788,7 +842,7 @@ def make_report(fields, data, snapshots, cvnames_kern, args, periodic_info=None)
                     cv0n = cv_pairs[0][0] if cv_pairs else 'z0'
                     cv1n = cv_pairs[1][0] if len(cv_pairs)>1 else 'z1'
 
-                    # Subsample if too many kernels for readability
+                    
                     max_show = 99999
                     if n_kern > max_show:
                         idx_show = np.random.choice(n_kern, max_show, replace=False)
@@ -799,7 +853,7 @@ def make_report(fields, data, snapshots, cvnames_kern, args, periodic_info=None)
                     mu_show = mu_mags[idx_show]
                     nk_show = Nks[idx_show]
 
-                    # Panel 1: coloured by |μ|
+                    
                     ax = axes[0]
                     norm_mu = Normalize(vmin=0, vmax=np.percentile(mu_mags, 95))
                     ec = EllipseCollection(
@@ -817,7 +871,7 @@ def make_report(fields, data, snapshots, cvnames_kern, args, periodic_info=None)
                     ax.set_title('Coloured by mean force |μ|')
                     ax.set_aspect('equal')
 
-                    # Panel 2: coloured by log₁₀(Nk)
+                    
                     ax = axes[1]
                     norm_nk = Normalize(vmin=0, vmax=np.log10(Nks.max()+1))
                     ec2 = EllipseCollection(
@@ -836,7 +890,7 @@ def make_report(fields, data, snapshots, cvnames_kern, args, periodic_info=None)
                     ax.set_aspect('equal')
 
                 elif centers.shape[1] == 1:
-                    # 1D: show horizontal bars of width 2σ centered at each kernel
+                    
                     fig, axes = plt.subplots(2, 1, figsize=(12, 6))
                     fig.suptitle(
                         f'λ-Kernel Positions (step {last["step"]})  '
@@ -856,7 +910,7 @@ def make_report(fields, data, snapshots, cvnames_kern, args, periodic_info=None)
                 pdf.savefig(fig, bbox_inches='tight')
                 plt.close(fig)
 
-                # PAGE 7 — Nk, |mu|, per-kernel sigma distributions + Nk-vs-|mu|
+                
                 fig, axes = plt.subplots(2, 2, figsize=(13, 8))
                 fig.suptitle(f'Kernel Statistics (step {last["step"]}, M={n_kern})', fontsize=13)
 
@@ -880,7 +934,7 @@ def make_report(fields, data, snapshots, cvnames_kern, args, periodic_info=None)
                 ax.set_title('Mean force magnitude distribution')
                 ax.legend(fontsize=8)
 
-                # Per-kernel sigma distribution (replaces old boost histogram)
+                
                 ax = axes[1, 0]
                 colors_sig = ['seagreen', 'darkorange', 'royalblue']
                 for d in range(sigmas.shape[1]):
@@ -905,7 +959,7 @@ def make_report(fields, data, snapshots, cvnames_kern, args, periodic_info=None)
                 pdf.savefig(fig, bbox_inches='tight')
                 plt.close(fig)
 
-                # PAGE 8 — Kernel evolution across snapshots
+                
                 if len(snapshots) > 1:
                     snap_steps  = [s['step']    for s in snapshots if s['M']>0]
                     snap_M      = [s['M']        for s in snapshots if s['M']>0]
@@ -916,19 +970,19 @@ def make_report(fields, data, snapshots, cvnames_kern, args, periodic_info=None)
                     snap_vamp   = [s['vamp']     for s in snapshots
                                    if s['M']>0 and s['vamp'] is not None]
 
-                    # Wamp time series: interpolate from COLVAR wamp column at
-                    # the kernel snapshot steps (wamp is per-step in COLVAR).
+                    
+                    
                     snap_wamp = []
                     if wamp_col is not None and time_col is not None:
                         colvar_steps = data[:, time_col]
                         colvar_wamp  = data[:, wamp_col]
                         for step in snap_steps:
-                            # Find the COLVAR row closest to this step
+                            
                             idx = np.argmin(np.abs(colvar_steps - step * args.dt))
                             snap_wamp.append(colvar_wamp[idx])
 
-                    # Expand to 2×3 when flooding diagnostics are available,
-                    # so each quantity gets its own panel and is easy to read.
+                    
+                    
                     have_flood_cols = (vbias_col is not None or wamp_col is not None)
                     ncols = 3 if have_flood_cols else 2
                     fig, axes = plt.subplots(2, ncols, figsize=(6*ncols, 8))
@@ -954,7 +1008,7 @@ def make_report(fields, data, snapshots, cvnames_kern, args, periodic_info=None)
                     axes[1,0].set_title('Silverman bandwidth')
                     axes[1,0].grid(True, alpha=0.3)
 
-                    # Panel [1,1]: V(λ) at s_fict and V_ex — same kJ/mol scale.
+                    
                     ax = axes[1,1]
                     if vbias_col is not None:
                         ax.plot(time, data[:, vbias_col], lw=0.8,
@@ -971,7 +1025,7 @@ def make_report(fields, data, snapshots, cvnames_kern, args, periodic_info=None)
                     ax.grid(True, alpha=0.3)
 
                     if ncols == 3:
-                        # Panel [0,2]: Vamp (grid amplitude) for long-range convergence view.
+                        
                         ax = axes[0,2]
                         if vamp_col is not None:
                             ax.plot(time, data[:, vamp_col], lw=0.8,
@@ -982,7 +1036,7 @@ def make_report(fields, data, snapshots, cvnames_kern, args, periodic_info=None)
                         ax.legend(fontsize=7)
                         ax.grid(True, alpha=0.3)
 
-                        # Panel [1,2]: wamp/V_ex ratio to Vamp for convergence assessment.
+                        
                         ax = axes[1,2]
                         if wamp_ts is not None and vamp_col is not None:
                             vamp_ts = data[:, vamp_col]
@@ -1000,9 +1054,9 @@ def make_report(fields, data, snapshots, cvnames_kern, args, periodic_info=None)
                     pdf.savefig(fig, bbox_inches='tight')
                     plt.close(fig)
 
-        # ══════════════════════════════════════════════════════════════════════
-        # Summary page
-        # ══════════════════════════════════════════════════════════════════════
+        
+        
+        
         fig, ax = plt.subplots(figsize=(10, 6))
         ax.axis('off')
         lines = [
@@ -1071,9 +1125,10 @@ def make_report(fields, data, snapshots, cvnames_kern, args, periodic_info=None)
         plt.show()
 
 
-# ─────────────────────── main ────────────────────────────────────────────────
+
 
 def main():
+    """Parse command-line arguments and run the FKERNELABF analysis report."""
     parser = argparse.ArgumentParser(
         description='Analysis report for FKERNELABF v3+ simulations.',
         formatter_class=argparse.RawDescriptionHelpFormatter,

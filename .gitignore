@@ -1,4 +1,7 @@
 Outputs/
 FEL_snapshots/
-./old.py
+old.py
 OLD_README
+README~
+czar_integrate
+src/czar_integrate

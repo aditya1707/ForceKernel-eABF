@@ -12,6 +12,7 @@
 #include <iomanip>
 #include <random>
 #include <cstdio>
+#include <cassert>
 
 #ifndef M_PI
 #define M_PI 3.14159265358979323846
@@ -61,6 +62,7 @@ private:
   std::vector<double> sigma0_;
   std::vector<double> sigmaMin_;
   bool fixedSigma_;
+  bool hasMin_;    // cached !sigmaMin_.empty(); avoids repeated .size() checks
 
   // -- lambda-kernels (bias driving, indexed at s_fict) --------------------------
   struct Kernel {
@@ -139,7 +141,8 @@ private:
   // --- restart state file ---
   // Written at STATESTRIDE interval, read on RESTART.
   // Contains: fictitious particle, kernel populations, sigma0, Z0_density.
-  // The mean-force grid is reconstructed from kernels on the first GRIDPACE step.
+  // The mean-force grid is reconstructed immediately from kernels on RESTART
+  // (not deferred to the next GRIDPACE step) so the bias is live from step 1.
   std::string stateFile_;
   unsigned stateStride_;
 
@@ -183,11 +186,12 @@ private:
       double s_rescaling = std::pow(neff*(dim_+2.0)/4.0, -1.0/(4.0+dim_));
       for (unsigned i = 0; i < dim_; ++i) {
         sig[i] *= s_rescaling;
-        if (sigmaMin_.size() > 0) sig[i] = std::max(sig[i], sigmaMin_[i]);
+        if (hasMin_) sig[i] = std::max(sig[i], sigmaMin_[i]);
       }
     }
     return sig;
   }
+
 
   // Silverman bandwidth for z-kernels -- same fix applied.
   std::vector<double> currentZSigma() const {
@@ -197,7 +201,7 @@ private:
       double s_rescaling = std::pow(neff*(dim_+2.0)/4.0, -1.0/(4.0+dim_));
       for (unsigned i = 0; i < dim_; ++i) {
         sig[i] *= s_rescaling;
-        if (sigmaMin_.size() > 0) sig[i] = std::max(sig[i], sigmaMin_[i]);
+        if (hasMin_) sig[i] = std::max(sig[i], sigmaMin_[i]);
       }
     }
     return sig;
@@ -289,7 +293,6 @@ private:
       for (unsigned i = 0; i < dim_; ++i)
         nlistDev2_[i] /= nlistIdx_.size();
     } else {
-      std::vector<double> sig = currentSigma();
       for (unsigned i = 0; i < dim_; ++i) nlistDev2_[i] = sq(sig[i]);
     }
     nlistUpdate_ = false;
@@ -332,7 +335,6 @@ private:
       for (unsigned i = 0; i < dim_; ++i)
         znlistDev2_[i] /= (double)znlistIdx_.size();
     } else {
-      std::vector<double> sig = currentZSigma();
       for (unsigned i = 0; i < dim_; ++i) znlistDev2_[i] = sq(sig[i]);
     }
 
@@ -346,6 +348,81 @@ private:
     }
     return false;
   }
+
+  // ================ generic kernel-pool merge loop ================
+  // Shared implementation for both lambda-kernels and z-kernels.
+  // Starting from 'giver', repeatedly finds the nearest mergeable neighbor
+  // and fuses the pair (weighted parallel-variance merge) until no further
+  // merge candidates exist.
+  //
+  // Template parameters:
+  //   K        -- kernel type (Kernel or ZKernel)
+  //   FindFn   -- callable(center, exclude) -> int: returns index of nearest
+  //               mergeable neighbor, or -1 if none within threshold
+  //   MuFn     -- callable(mu_merged) -> double: post-merge mu transform
+  //               (clamping for lambda-kernels; identity for z-kernels)
+  //
+  // The giver kernel is removed by swap-with-last (O(1)); the nlist index
+  // array is patched in-place to keep it consistent.
+  template<typename K, typename FindFn, typename MuFn>
+  void mergeKernelPool(unsigned giver,
+                       std::vector<K>& kernels,
+                       unsigned& M,
+                       double& sumNk2,
+                       std::vector<unsigned>& nlistIdx,
+                       FindFn findMerge,
+                       MuFn muUpdate) {
+    const bool hasMin = !sigmaMin_.empty();
+    int taker = findMerge(kernels[giver].center, (int)giver);
+    while (taker >= 0) {
+      assert(M > 0);
+      assert(giver < kernels.size() && (unsigned)taker < kernels.size());
+
+      double Nt = kernels[taker].Nk, Ng = kernels[giver].Nk, Ntot = Nt + Ng;
+      assert(Ntot > 0.0);
+      sumNk2 -= (Nt*Nt + Ng*Ng);
+
+      const double inv = 1.0 / Ntot;
+      for (unsigned i = 0; i < dim_; ++i) {
+        double ct = kernels[taker].center[i];
+        double cg = kernels[giver].center[i];
+        if (periodic_[i] && domLen_[i] > 0)
+          cg = ct + periodicDelta(i, ct, cg);
+        double c_new = (Nt*ct + Ng*cg) * inv;
+        double dt = ct - c_new, dg = cg - c_new;
+        double var = (Nt*(sq(kernels[taker].sigma[i]) + sq(dt)) +
+                      Ng*(sq(kernels[giver].sigma[i]) + sq(dg))) * inv;
+        kernels[taker].center[i] = wrapToDomain(i, c_new);
+        kernels[taker].sigma[i] = std::sqrt(std::max(var,
+            sq(hasMin ? sigmaMin_[i] : 1e-6)));
+        double mu_new = (Nt*kernels[taker].mu[i] + Ng*kernels[giver].mu[i]) * inv;
+        kernels[taker].mu[i] = muUpdate(mu_new);
+      }
+      kernels[taker].Nk = Ntot;
+      sumNk2 += Ntot*Ntot;
+
+      // Swap giver with the last kernel to remove it in O(1).
+      // If taker was the last element, it moves into giver's slot — newGiver tracks this.
+      unsigned last = M - 1;
+      unsigned newGiver = (unsigned)taker;
+      if (giver != last && (unsigned)taker == last) newGiver = giver;
+      if (giver != last) kernels[giver] = std::move(kernels[last]);
+      kernels.resize(last);
+      --M;
+      if (nlist_) {
+        for (auto it = nlistIdx.begin(); it != nlistIdx.end(); ) {
+          if (*it == giver) { it = nlistIdx.erase(it); }
+          else {
+            if (*it == last) *it = giver;
+            ++it;
+          }
+        }
+      }
+      giver = newGiver;
+      taker = findMerge(kernels[giver].center, (int)giver);
+    }
+  }
+
 
   // ================ lambda-kernel compression (bias driving) ================
   void addSample(const std::vector<double>& s_in, const std::vector<double>& f_in) {
@@ -373,23 +450,24 @@ private:
       double Nnew = kernels_[k].Nk;
       sumNk2_ += Nnew*Nnew;
       totalN_ += 1.0;
+      const double inv_Nnew = 1.0 / Nnew;
 
       for (unsigned i = 0; i < dim_; ++i) {
         // mu: exact running mean
         double muold = kernels_[k].mu[i];
-        double munew = (Nold*muold + f[i]) / Nnew;
+        double munew = (Nold*muold + f[i]) * inv_Nnew;
         kernels_[k].mu[i] = std::max(-muxClamp_, std::min(muxClamp_, munew));
 
         // center + sigma: parallel variance with pre-arrival mini-kernel
         double ct = kernels_[k].center[i];
         double cs = ct + periodicDelta(i, ct, s[i]);
-        double c_new = (Nold * ct + 1.0 * cs) / Nnew;
+        double c_new = (Nold * ct + cs) * inv_Nnew;
         double dt = ct - c_new, ds = cs - c_new;
         double var = (Nold * (sq(kernels_[k].sigma[i]) + sq(dt)) +
-                      1.0  * (sq(sig[i])               + sq(ds))) / Nnew;
+                             (sq(sig[i])               + sq(ds))) * inv_Nnew;
         kernels_[k].center[i] = wrapToDomain(i, c_new);
         kernels_[k].sigma[i] = std::sqrt(std::max(var,
-            sq(sigmaMin_.size() > 0 ? sigmaMin_[i] : 1e-6)));
+            sq(hasMin_ ? sigmaMin_[i] : 1e-6)));
       }
       giver = (unsigned)k;
 
@@ -403,7 +481,7 @@ private:
         nk.sigma[i] = sig[i];
       }
       nk.Nk = 1.0;
-      kernels_.push_back(nk);
+      kernels_.push_back(std::move(nk));
       ++M_;
       totalN_ += 1.0;
       sumNk2_ += 1.0;
@@ -413,51 +491,12 @@ private:
 
     // ── Recursive merge from giver (runs for BOTH branches) ────────────
     // After absorption the kernel's center has shifted; after new-kernel
-    // creation the kernel may overlap a neighbor.  In either case, check
+    // creation the kernel may overlap a neighbor. In either case, check
     // for cascading merges until no more candidates remain.
-    std::vector<double> gc(kernels_[giver].center);
-    int taker = findMergeable(gc, (int)giver);
-    while (taker >= 0) {
-      double Nt = kernels_[taker].Nk, Ng = kernels_[giver].Nk, Ntot = Nt + Ng;
-      sumNk2_ -= (Nt*Nt + Ng*Ng);
-      if (Ntot > 0) {
-        for (unsigned i = 0; i < dim_; ++i) {
-          double ct = kernels_[taker].center[i];
-          double cg = kernels_[giver].center[i];
-          if (periodic_[i] && domLen_[i] > 0)
-            cg = ct + periodicDelta(i, ct, cg);
-          double c_new = (Nt*ct + Ng*cg) / Ntot;
-          double dt = ct - c_new, dg = cg - c_new;
-          double var = (Nt*(sq(kernels_[taker].sigma[i]) + sq(dt)) +
-                        Ng*(sq(kernels_[giver].sigma[i]) + sq(dg))) / Ntot;
-          kernels_[taker].center[i] = wrapToDomain(i, c_new);
-          kernels_[taker].sigma[i] = std::sqrt(std::max(var, sq(sigmaMin_.size()>0 ? sigmaMin_[i] : 1e-6)));
-          kernels_[taker].mu[i] = std::max(-muxClamp_, std::min(muxClamp_,
-              (Nt*kernels_[taker].mu[i] + Ng*kernels_[giver].mu[i]) / Ntot));
-        }
-        kernels_[taker].Nk = Ntot;
-        sumNk2_ += Ntot*Ntot;
-      }
+    mergeKernelPool(giver, kernels_, M_, sumNk2_, nlistIdx_,
+        [this](const std::vector<double>& c, int ex){ return findMergeable(c, ex); },
+        [this](double mu){ return std::max(-muxClamp_, std::min(muxClamp_, mu)); });
 
-      // Swap giver to back and pop; update neighbor list index accordingly.
-      unsigned last = M_-1, newGiver = (unsigned)taker;
-      if (giver != last && (unsigned)taker == last) newGiver = giver;
-      if (giver != last) kernels_[giver] = kernels_[last];
-      kernels_.resize(last);
-      --M_;
-      if (nlist_) {
-        for (auto it = nlistIdx_.begin(); it != nlistIdx_.end(); ) {
-          if (*it == giver) { it = nlistIdx_.erase(it); }
-          else {
-            if (*it == last) *it = giver;
-            ++it;
-          }
-        }
-      }
-      giver = newGiver;
-      gc.assign(kernels_[giver].center.begin(), kernels_[giver].center.end());
-      taker = findMergeable(gc, (int)giver);
-    }
     // Cascading merges may have shifted kernel centers; flag nlist rebuild.
     if (nlist_) nlistUpdate_ = true;
   }
@@ -491,21 +530,22 @@ private:
       double Nnew = zKernels_[best].Nk;
       zSumNk2_ += Nnew*Nnew;
       zTotalN_ += 1.0;
+      const double inv_Nnew = 1.0 / Nnew;
 
       for (unsigned i = 0; i < dim_; ++i) {
         // mu: exact running mean, unclamped
-        zKernels_[best].mu[i] = (Nold * zKernels_[best].mu[i] + f_raw[i]) / Nnew;
+        zKernels_[best].mu[i] = (Nold * zKernels_[best].mu[i] + f_raw[i]) * inv_Nnew;
 
         // center + sigma: parallel variance with pre-arrival mini-kernel
         double ct = zKernels_[best].center[i];
         double cs = ct + periodicDelta(i, ct, z[i]);
-        double c_new = (Nold * ct + 1.0 * cs) / Nnew;
+        double c_new = (Nold * ct + cs) * inv_Nnew;
         double dt = ct - c_new, ds = cs - c_new;
         double var = (Nold * (sq(zKernels_[best].sigma[i]) + sq(dt)) +
-                      1.0  * (sq(sig[i])                   + sq(ds))) / Nnew;
+                             (sq(sig[i])                   + sq(ds))) * inv_Nnew;
         zKernels_[best].center[i] = wrapToDomain(i, c_new);
         zKernels_[best].sigma[i] = std::sqrt(std::max(var,
-            sq(sigmaMin_.size() > 0 ? sigmaMin_[i] : 1e-6)));
+            sq(hasMin_ ? sigmaMin_[i] : 1e-6)));
       }
       giver = (unsigned)best;
 
@@ -519,7 +559,7 @@ private:
         nk.sigma[i]  = sig[i];
       }
       nk.Nk = 1.0;
-      zKernels_.push_back(nk);
+      zKernels_.push_back(std::move(nk));
       ++zM_;
       zTotalN_ += 1.0;
       zSumNk2_ += 1.0;
@@ -531,50 +571,10 @@ private:
     }
 
     // ── Recursive merge from giver (runs for BOTH branches) ────────────
-    std::vector<double> gc(zKernels_[giver].center);
-    int taker = findMergeableZ(gc, (int)giver);
-    while (taker >= 0) {
-      double Nt = zKernels_[taker].Nk, Ng = zKernels_[giver].Nk, Ntot = Nt + Ng;
-      zSumNk2_ -= (Nt*Nt + Ng*Ng);
-      if (Ntot > 0) {
-        for (unsigned i = 0; i < dim_; ++i) {
-          double ct = zKernels_[taker].center[i];
-          double cg = zKernels_[giver].center[i];
-          if (periodic_[i] && domLen_[i] > 0)
-            cg = ct + periodicDelta(i, ct, cg);
-          double c_new = (Nt*ct + Ng*cg) / Ntot;
-          double dt = ct - c_new, dg = cg - c_new;
-          double var = (Nt*(sq(zKernels_[taker].sigma[i]) + sq(dt)) +
-                        Ng*(sq(zKernels_[giver].sigma[i]) + sq(dg))) / Ntot;
-          zKernels_[taker].center[i] = wrapToDomain(i, c_new);
-          zKernels_[taker].sigma[i] = std::sqrt(std::max(var,
-              sq(sigmaMin_.size()>0 ? sigmaMin_[i] : 1e-6)));
-          zKernels_[taker].mu[i] =
-              (Nt*zKernels_[taker].mu[i] + Ng*zKernels_[giver].mu[i]) / Ntot;
-        }
-        zKernels_[taker].Nk = Ntot;
-        zSumNk2_ += Ntot*Ntot;
-      }
+    mergeKernelPool(giver, zKernels_, zM_, zSumNk2_, znlistIdx_,
+        [this](const std::vector<double>& c, int ex){ return findMergeableZ(c, ex); },
+        [](double mu){ return mu; });
 
-      // Swap giver to back and pop; update z neighbor list index accordingly.
-      unsigned last = zM_ - 1, newGiver = (unsigned)taker;
-      if (giver != last && (unsigned)taker == last) newGiver = giver;
-      if (giver != last) zKernels_[giver] = zKernels_[last];
-      zKernels_.resize(last);
-      --zM_;
-      if (nlist_) {
-        for (auto it = znlistIdx_.begin(); it != znlistIdx_.end(); ) {
-          if (*it == giver) { it = znlistIdx_.erase(it); }
-          else {
-            if (*it == last) *it = giver;
-            ++it;
-          }
-        }
-      }
-      giver = newGiver;
-      gc.assign(zKernels_[giver].center.begin(), zKernels_[giver].center.end());
-      taker = findMergeableZ(gc, (int)giver);
-    }
     // Flag nlist rebuild after any center/sigma changes.
     if (nlist_) znlistUpdate_ = true;
   }
@@ -606,8 +606,11 @@ private:
     std::vector<double>& Z = Zgrid;   // alias — filled in-place
     std::vector<double> numF(gridTotal_ * dim_, 0.0);
 
+    std::vector<int> R(dim_), ic(dim_);
+    std::vector<std::vector<double>> w1d(dim_);
+    std::vector<std::vector<unsigned>> gi1d(dim_);
+
     for (unsigned kk = 0; kk < M_; ++kk) {
-      std::vector<int> R(dim_), ic(dim_);
       for (unsigned d = 0; d < dim_; ++d) {
         R[d] = (int)std::ceil(nsigmaCut_ * kernels_[kk].sigma[d] / std::max(gridDx_[d], 1e-12));
         ic[d] = (int)std::round((kernels_[kk].center[d] - gridMin_[d]) / gridDx_[d]);
@@ -617,12 +620,10 @@ private:
           ic[d] = std::max(0, std::min(ic[d], (int)gridN_[d]-1));
       }
 
-      std::vector<std::vector<double>> w1d(dim_);
-      std::vector<std::vector<unsigned>> gi1d(dim_);
       for (unsigned d = 0; d < dim_; ++d) {
         double inv4s2 = 1.0 / (4.0 * sq(kernels_[kk].sigma[d]) + 1e-300);
-        w1d[d].reserve(2*R[d]+1);
-        gi1d[d].reserve(2*R[d]+1);
+        w1d[d].clear();   w1d[d].reserve(2*R[d]+1);
+        gi1d[d].clear(); gi1d[d].reserve(2*R[d]+1);
         for (int r = -R[d]; r <= R[d]; ++r) {
           int raw = ic[d] + r;
           unsigned gi;
@@ -715,9 +716,15 @@ private:
       for (unsigned g = 0; g < gridTotal_; ++g)
         if (Zgrid[g] > 1e-10) Zpop.push_back(Zgrid[g]);
       if (!Zpop.empty()) {
-        std::sort(Zpop.begin(), Zpop.end());
         size_t n = Zpop.size();
-        Z0_density_ = (n % 2 == 0) ? 0.5*(Zpop[n/2-1]+Zpop[n/2]) : Zpop[n/2];
+        std::nth_element(Zpop.begin(), Zpop.begin() + n/2, Zpop.end());
+        if (n % 2 == 1) {
+          Z0_density_ = Zpop[n/2];
+        } else {
+          double upper = Zpop[n/2];
+          double lower = *std::max_element(Zpop.begin(), Zpop.begin() + n/2);
+          Z0_density_ = 0.5 * (lower + upper);
+        }
       }
       if (Z0_density_ < 1e-10) Z0_density_ = 1.0;
 
@@ -730,12 +737,12 @@ private:
 
       double c_ex = kT_ * (biasFactor_ - 1.0);
 
+      std::vector<unsigned> idx(dim_);
       for (unsigned g = 0; g < gridTotal_; ++g) {
         if (Zgrid[g] < 1e-300) continue;  // no data, no force
         double denom = Z0_density_ + Zgrid[g];
 
         // Extract multi-index for boundary checks.
-        std::vector<unsigned> idx(dim_);
         gridUnflat(g, idx);
 
         for (unsigned d = 0; d < dim_; ++d) {
@@ -958,19 +965,16 @@ private:
     std::fprintf(kfile, ")\n");
     std::fprintf(kfile, "# --------------------------------------------------------\n");
 
+    std::vector<std::string> cvNames(dim_);
+    for (unsigned i = 0; i < dim_; ++i) cvNames[i] = getPntrToArgument(i)->getName();
+
     std::fprintf(kfile, "# %5s  %8s", "k", "Nk");
-    for (unsigned i = 0; i < dim_; ++i) {
-      std::string cvn = getPntrToArgument(i)->getName();
-      std::fprintf(kfile, "  %12s", ("c_"+cvn).c_str());
-    }
-    for (unsigned i = 0; i < dim_; ++i) {
-      std::string cvn = getPntrToArgument(i)->getName();
-      std::fprintf(kfile, "  %12s", ("mu_"+cvn).c_str());
-    }
-    for (unsigned i = 0; i < dim_; ++i) {
-      std::string cvn = getPntrToArgument(i)->getName();
-      std::fprintf(kfile, "  %10s", ("sig_"+cvn).c_str());
-    }
+    for (unsigned i = 0; i < dim_; ++i)
+      std::fprintf(kfile, "  %12s", ("c_"+cvNames[i]).c_str());
+    for (unsigned i = 0; i < dim_; ++i)
+      std::fprintf(kfile, "  %12s", ("mu_"+cvNames[i]).c_str());
+    for (unsigned i = 0; i < dim_; ++i)
+      std::fprintf(kfile, "  %10s", ("sig_"+cvNames[i]).c_str());
     std::fprintf(kfile, "  %10s  %8s\n", "|mu|", "wt");
 
     for (unsigned kk = 0; kk < M_; ++kk) {
@@ -1002,6 +1006,10 @@ private:
     return base.substr(0, dot) + buf + base.substr(dot);
   }
 
+  // ================ CZAR z-kernel file ================
+  // Step-stamped snapshot of all z-kernels; never overwritten between writes.
+  // The file header embeds kappa, kT, periodicity, and domain so that
+  // czar_integrate.py can reconstruct A(z) without access to the input file.
   void writeCZARFile() {
     if (czarFile_.empty() || zM_ == 0) return;
     std::string path = stampedPath(czarFile_);
@@ -1056,15 +1064,15 @@ private:
   //   - lambda-kernel population (center, mu, sigma, Nk)
   //   - z-kernel population (center, mu, sigma, Nk)
   //   - Z0_density for exploration
-
   void writeState() {
     if (stateFile_.empty()) return;
-    // Use std::ofstream to avoid PLUMED's automatic .bck backups on restart.
-    // The state file is overwritten at every grid rebuild; backups are unwanted.
-    std::ofstream f(stateFile_.c_str());
+    // Write to a temporary file then atomically rename to avoid corruption
+    // if the process is killed mid-write.
+    std::string tmpFile = stateFile_ + ".tmp";
+    std::ofstream f(tmpFile.c_str());
     if (!f.is_open()) {
       log.printf("  [FKERNELABF] WARNING: could not open state file '%s' for writing.\n",
-                 stateFile_.c_str());
+                 tmpFile.c_str());
       return;
     }
     f << std::setprecision(15);
@@ -1113,17 +1121,33 @@ private:
 
     // RNG state for reproducible restart.
     // std::mt19937 supports << / >> for full internal state serialization.
-    {
-      std::ostringstream rng_ss;
-      rng_ss << rng_;
-      f << "RNG " << rng_ss.str() << "\n";
-    }
+    f << "RNG " << rng_ << "\n";
 
     f << "END\n";
 
     f.flush();
-    log.printf("  [FKERNELABF] State written: %s  (M=%u, zM=%u, step %lld)\n",
-               stateFile_.c_str(), M_, zM_, (long long)getStep());
+    if (!f.good()) {
+      log.printf("  [FKERNELABF] WARNING: I/O error writing state file '%s'.\n",
+                 tmpFile.c_str());
+      return;
+    }
+    f.close();
+    if (std::rename(tmpFile.c_str(), stateFile_.c_str()) != 0)
+      log.printf("  [FKERNELABF] WARNING: could not rename '%s' to '%s'.\n",
+                 tmpFile.c_str(), stateFile_.c_str());
+    else
+      log.printf("  [FKERNELABF] State written: %s  (M=%u, zM=%u, step %lld)\n",
+                 stateFile_.c_str(), M_, zM_, (long long)getStep());
+  }
+
+  // Helper for readState(): aborts with a descriptive error if the stream
+  // is in a failed state after parsing 'description'.  readState uses this
+  // pattern inline for most fields; this helper exists for any future
+  // consolidation where the repeated literal string would be too verbose.
+  void parseCheck(const std::istringstream& iss, const std::string& description) {
+    if (iss.fail())
+      error("RESTART state file: failed to parse " + description
+            + " — file may be truncated or corrupted.");
   }
 
   void readState() {
@@ -1164,30 +1188,39 @@ private:
                 + ". Cannot restart with different temperature.");
       } else if (key == "s_fict") {
         for (unsigned i = 0; i < dim_; ++i) iss >> s_fict_[i];
+        if (!iss) error("RESTART state file: failed to parse 's_fict' — file may be truncated or corrupted.");
       } else if (key == "v_fict") {
         for (unsigned i = 0; i < dim_; ++i) iss >> v_fict_[i];
+        if (!iss) error("RESTART state file: failed to parse 'v_fict' — file may be truncated or corrupted.");
       } else if (key == "sigma0") {
         for (unsigned i = 0; i < dim_; ++i) iss >> sigma0_[i];
+        if (!iss) error("RESTART state file: failed to parse 'sigma0' — file may be truncated or corrupted.");
       } else if (key == "adaptive_done") {
         int done; iss >> done;
+        if (!iss) error("RESTART state file: failed to parse 'adaptive_done' — file may be truncated or corrupted.");
         if (done) {
           adaptiveSigma_ = false;
-          adaptiveCounter_ = adaptiveSigmaStride_ + 1;  // skip warmup
+          adaptiveCounter_ = adaptiveSigmaStride_ + 1;
         }
       } else if (key == "Z0_density") {
         iss >> Z0_density_;
+        if (!iss) error("RESTART state file: failed to parse 'Z0_density' — file may be truncated or corrupted.");
       } else if (key == "M") {
         iss >> M_;
       } else if (key == "totalN") {
         iss >> totalN_;
+        if (!iss) error("RESTART state file: failed to parse 'totalN' — file may be truncated or corrupted.");
       } else if (key == "sumNk2") {
         iss >> sumNk2_;
+        if (!iss) error("RESTART state file: failed to parse 'sumNk2' — file may be truncated or corrupted.");
       } else if (key == "zM") {
         iss >> zM_;
       } else if (key == "zTotalN") {
         iss >> zTotalN_;
+        if (!iss) error("RESTART state file: failed to parse 'zTotalN' — file may be truncated or corrupted.");
       } else if (key == "zSumNk2") {
         iss >> zSumNk2_;
+        if (!iss) error("RESTART state file: failed to parse 'zSumNk2' — file may be truncated or corrupted.");
       } else if (key == "K") {
         // Lambda-kernel data line
         Kernel nk;
@@ -1196,6 +1229,18 @@ private:
         for (unsigned i = 0; i < dim_; ++i) iss >> nk.center[i];
         for (unsigned i = 0; i < dim_; ++i) iss >> nk.mu[i];
         for (unsigned i = 0; i < dim_; ++i) iss >> nk.sigma[i];
+        if (!iss) error("RESTART state file: failed to parse kernel 'K' row — file may be truncated or corrupted.");
+        if (nk.Nk <= 0)
+          error("RESTART state file: kernel 'K' has Nk=" + std::to_string(nk.Nk)
+                + " <= 0. Corrupted state file.");
+        for (unsigned i = 0; i < dim_; ++i)
+          if (nk.sigma[i] <= 0.0 || !std::isfinite(nk.sigma[i]))
+            error("RESTART state file: kernel 'K' has sigma[" + std::to_string(i)
+                  + "]=" + std::to_string(nk.sigma[i]) + " which is non-positive or non-finite. Corrupted state file.");
+        for (unsigned i = 0; i < dim_; ++i)
+          if (!std::isfinite(nk.center[i]) || !std::isfinite(nk.mu[i]))
+            error("RESTART state file: kernel 'K' has non-finite center or mu at dimension "
+                  + std::to_string(i) + ". Corrupted state file.");
         kernels_.push_back(nk);
       } else if (key == "Z") {
         // Z-kernel data line
@@ -1205,6 +1250,18 @@ private:
         for (unsigned i = 0; i < dim_; ++i) iss >> nk.center[i];
         for (unsigned i = 0; i < dim_; ++i) iss >> nk.mu[i];
         for (unsigned i = 0; i < dim_; ++i) iss >> nk.sigma[i];
+        if (!iss) error("RESTART state file: failed to parse z-kernel 'Z' row — file may be truncated or corrupted.");
+        if (nk.Nk <= 0)
+          error("RESTART state file: z-kernel 'Z' has Nk=" + std::to_string(nk.Nk)
+                + " <= 0. Corrupted state file.");
+        for (unsigned i = 0; i < dim_; ++i)
+          if (nk.sigma[i] <= 0.0 || !std::isfinite(nk.sigma[i]))
+            error("RESTART state file: z-kernel 'Z' has sigma[" + std::to_string(i)
+                  + "]=" + std::to_string(nk.sigma[i]) + " which is non-positive or non-finite. Corrupted state file.");
+        for (unsigned i = 0; i < dim_; ++i)
+          if (!std::isfinite(nk.center[i]) || !std::isfinite(nk.mu[i]))
+            error("RESTART state file: z-kernel 'Z' has non-finite center or mu at dimension "
+                  + std::to_string(i) + ". Corrupted state file.");
         zKernels_.push_back(nk);
       } else if (key == "RNG") {
         // Restore full mt19937 state for reproducible restart.
@@ -1214,7 +1271,7 @@ private:
       } else if (key == "END") {
         break;
       }
-      // Unknown keys (V_offset, have_V_offset from old v3.0 state files, etc.)
+      // Unknown keys (from old state file versions, etc.)
       // are silently skipped for backward compatibility.
     }
 
@@ -1342,7 +1399,7 @@ public:
     keys.add("optional", "KERNELSTRIDE",
              "Write lambda-kernel state every N steps.");
 
-    // CZAR output
+    
     keys.add("optional", "CZARSTRIDE",
              "Write CZAR z-kernel file every N steps. Each write produces a "
              "step-stamped file {label}.czar_kernels_{step:08d}.dat. "
@@ -1461,7 +1518,7 @@ public:
     adaptiveSigmaStride_ = 0;
     parse("ADAPTIVE_SIGMA_STRIDE", adaptiveSigmaStride_);
     if (adaptiveSigma_ && adaptiveSigmaStride_ == 0)
-      adaptiveSigmaStride_ = 10 * pace_;   // now uses the user's PACE, not the default
+      adaptiveSigmaStride_ = 10 * pace_;  // 10 strides gives ~10× the per-step variance for a stable estimate
     if (!adaptiveSigma_ && adaptiveSigmaStride_ > 0)
       warning("ADAPTIVE_SIGMA_STRIDE ignored because SIGMA was provided explicitly.");
 
@@ -1475,6 +1532,8 @@ public:
         if (sigmaMin_[i] <= 0.0) error("SIGMA_MIN must be > 0 for all CVs.");
       }
     }
+    hasMin_ = !sigmaMin_.empty();
+
 
     // Silently consume deprecated keywords so old input files still parse.
     {
@@ -1635,7 +1694,7 @@ public:
       for (unsigned i = 0; i < dim_; ++i) log.printf("%s%.4f", i?",":"", sigma0_[i]);
       log.printf("\n");
     }
-    if (sigmaMin_.size() > 0) {
+    if (hasMin_) {
       log.printf("  SIGMA_MIN=");
       for (unsigned i = 0; i < dim_; ++i) log.printf("%s%.4f", i?",":"", sigmaMin_[i]);
       log.printf("\n");
@@ -1740,7 +1799,7 @@ public:
           std_i = 0.1;
         }
         sigma0_[i] = std_i;
-        if (sigmaMin_.size() > i) sigma0_[i] = std::max(sigma0_[i], sigmaMin_[i]);
+        if (!sigmaMin_.empty()) sigma0_[i] = std::max(sigma0_[i], sigmaMin_[i]);
       }
       log.printf("  [FKERNELABF] Adaptive sigma finalised after %u-step warmup: sigma=(",
                  adaptiveSigmaStride_);
@@ -1829,8 +1888,8 @@ public:
       s_fict_[i] += halfdt * v_fict_[i];
 
     // ── O: Ornstein-Uhlenbeck thermostat (full dt) ─────────────────────────
+    const double c1 = std::exp(-friction_ * dt);
     for (unsigned i = 0; i < dim_; ++i) {
-      double c1 = std::exp(-friction_ * dt);
       double c2 = std::sqrt(kT_ / mass_[i] * (1.0 - c1*c1));
       v_fict_[i] = c1 * v_fict_[i] + c2 * gauss_(rng_);
     }
@@ -1839,6 +1898,12 @@ public:
     for (unsigned i = 0; i < dim_; ++i) {
       s_fict_[i] += halfdt * v_fict_[i];
       // Boundary handling (reflecting walls or periodic wrap)
+      if (!std::isfinite(s_fict_[i])) {
+        log.printf("  [FKERNELABF] WARNING: s_fict_[%u] is non-finite (%g); resetting to domain center.\n",
+                   i, s_fict_[i]);
+        s_fict_[i] = 0.5 * (gridMin_[i] + gridMax_[i]);
+        v_fict_[i] = 0.0;
+      }
       if (periodic_[i]) {
         s_fict_[i] = wrapToDomain(i, s_fict_[i]);
       } else {
@@ -1922,5 +1987,5 @@ public:
 
 PLUMED_REGISTER_ACTION(ForceKernelABF, "FKERNELABF")
 
-}  // namespace bias
-}  // namespace PLMD
+}  
+}  
