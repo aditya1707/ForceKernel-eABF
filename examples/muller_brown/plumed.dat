@@ -62,6 +62,9 @@ fk: FKERNELABF ...
     # Output
     KERNELSTRIDE=50000
     CZARSTRIDE=50000
+    # KERNELINFOSTRIDE=50   # optional: override default stride (PACE) to match PRINT STRIDE
+                            # KERNELINFO is always written automatically by the plugin
+                            # pass to fkabf_analysis.py via --kernelinfo KERNELINFO
 ...
 
 #UPPER_WALLS ARG=d1.x AT=1.2  KAPPA=1500

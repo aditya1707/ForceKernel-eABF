@@ -146,9 +146,14 @@ private:
   std::string stateFile_;
   unsigned stateStride_;
 
+  // --- kernel diagnostics file ---
+  // Appends one line per write to {label}.kernelinfo.dat.
+  // Columns: step, M, zM, neff, sigma per CV dim, nlker.
+  std::string kernelInfoFile_;
+  unsigned kernelInfoStride_;
+
   // --- state ---
   std::vector<std::string> fictNames_;
-  std::vector<std::string> sigmaNames_;
 
   // ================ helpers ================
   double sq(double x) const { return x * x; }
@@ -944,6 +949,41 @@ private:
                path.c_str(), M_, (long long)getStep());
   }
 
+  // ================ kernel diagnostics file ================
+  // Appends one line per call to {label}.kernelinfo.dat.
+  // Header written on first call (file absent or step 0).
+  // PLUMED-compatible #! FIELDS header for use with fkabf_analysis.py.
+  void writeKernelInfo() {
+    if (kernelInfoFile_.empty()) return;
+    if (getStep() % kernelInfoStride_ != 0) return;
+
+    bool write_header = (getStep() == 0);
+    if (!write_header) {
+      std::ifstream test(kernelInfoFile_);
+      write_header = !test.good();
+    }
+
+    std::FILE* f = std::fopen(kernelInfoFile_.c_str(), "a");
+    if (!f) return;
+
+    if (write_header) {
+      std::fprintf(f, "#! FIELDS step M zM neff");
+      for (unsigned i = 0; i < dim_; ++i)
+        std::fprintf(f, " %s_sigma", getPntrToArgument(i)->getName().c_str());
+      std::fprintf(f, " nlker\n");
+    }
+
+    const double neff = (sumNk2_ > 0.0) ? (totalN_*totalN_/sumNk2_) : (double)M_;
+    const std::vector<double> sig = currentSigma();
+
+    std::fprintf(f, "%lld %u %u %.4f", (long long)getStep(), M_, zM_, neff);
+    for (unsigned i = 0; i < dim_; ++i)
+      std::fprintf(f, " %.6f", sig[i]);
+    std::fprintf(f, " %zu\n", nlistIdx_.size());
+
+    std::fclose(f);
+  }
+
   // ================ lambda-kernel dump ================
   // Human-readable columnar format. Each call writes a fresh step-stamped file.
   // Columns use CV names, plus derived quantities:
@@ -1411,19 +1451,14 @@ public:
              "Write restart state file every N steps (default: CZARSTRIDE if set, "
              "otherwise 10×GRIDPACE). The state file {label}.state.dat is overwritten "
              "in place (no backups). On RESTART, the state is read automatically.");
+    keys.add("optional", "KERNELINFOSTRIDE",
+             "Output stride for KERNELINFO file — always written, appending one line per "
+             "write with M, zM, neff, sigma per CV dim, nlker. Default: PACE. Override "
+             "to match your PRINT STRIDE (e.g. KERNELINFOSTRIDE=50).");
 
     // Output components
     keys.addOutputComponent("force2",    "default","squared net bias force magnitude on λ (ABF + exploration)");
-    keys.addOutputComponent("lambda",    "default","deprecated: always 1.0 in v3+ (kept for COLVAR compatibility)");
-    keys.addOutputComponent("nkernels",  "default","number of compressed lambda-kernels");
-    keys.addOutputComponent("nzkernels", "default","number of compressed z-kernels (CZAR)");
-    keys.addOutputComponent("vamp",      "default","deprecated: always 0 in v3.1+ (Poisson solver removed)");
-    keys.addOutputComponent("vbias",     "default","deprecated: always 0 in v3.1+ (kept for COLVAR compatibility)");
-    keys.addOutputComponent("alpha",     "default","reserved (always 0 in v3+; kept for COLVAR compatibility)");
     keys.addOutputComponent("wamp",      "default","exploration potential V_ex = c·ln(1+Z/Z₀) at s_fict (kJ/mol); 0 when γ=1");
-    keys.addOutputComponent("neff",      "default","NW-weighted effective sample count at current s_fict");
-    keys.addOutputComponent("_sigma",    "default","current Silverman bandwidth for each CV dimension");
-    keys.addOutputComponent("nlker",     "default","number of lambda-kernels in neighbor list");
     keys.addOutputComponent("_fict",     "default","fictitious variable position from extended Lagrangian");
   }
 
@@ -1447,7 +1482,8 @@ public:
       lambdaGridStride_(0),
       kernelStride_(0),
       czarStride_(0),
-      stateStride_(0) {
+      stateStride_(0),
+      kernelInfoStride_(0) {
 
     dim_ = getNumberOfArguments();
     if (dim_ < 1 || dim_ > 3)
@@ -1644,6 +1680,10 @@ public:
     kernelStride_ = 0; parse("KERNELSTRIDE", kernelStride_);
     if (kernelStride_ > 0) kernelFile_ = lbl + ".kernels.dat";
 
+    kernelInfoFile_ = "KERNELINFO";
+    kernelInfoStride_ = 0; parse("KERNELINFOSTRIDE", kernelInfoStride_);
+    if (kernelInfoStride_ == 0) kernelInfoStride_ = pace_;
+
     czarFile_ = lbl + ".czar_kernels.dat";  // base; stamped on each write
     stateFile_ = lbl + ".state.dat";        // overwritten at STATESTRIDE interval
 
@@ -1660,22 +1700,7 @@ public:
 
     // Output components
     addComponent("force2");   componentIsNotPeriodic("force2");
-    addComponent("lambda");   componentIsNotPeriodic("lambda");
-    addComponent("nkernels"); componentIsNotPeriodic("nkernels");
-    addComponent("nzkernels");componentIsNotPeriodic("nzkernels");
-    addComponent("vamp");     componentIsNotPeriodic("vamp");
-    addComponent("vbias");    componentIsNotPeriodic("vbias");
-    addComponent("alpha");    componentIsNotPeriodic("alpha");
     addComponent("wamp");     componentIsNotPeriodic("wamp");
-    addComponent("neff");     componentIsNotPeriodic("neff");
-    addComponent("nlker");    componentIsNotPeriodic("nlker");
-
-    sigmaNames_.resize(dim_);
-    for (unsigned i = 0; i < dim_; ++i) {
-      sigmaNames_[i] = getPntrToArgument(i)->getName() + "_sigma";
-      addComponent(sigmaNames_[i]);
-      componentIsNotPeriodic(sigmaNames_[i]);
-    }
 
     fictNames_.resize(dim_);
     for (unsigned i = 0; i < dim_; ++i) {
@@ -1743,6 +1768,9 @@ public:
       log.printf("  [FKERNELABF]   lambda-grid    : disabled (set LAMBDAGRIDSTRIDE to enable)\n");
     log.printf("  [FKERNELABF]   restart state  : %s  every %u steps\n",
                stateFile_.c_str(), stateStride_);
+    log.printf("  [FKERNELABF]   kernel info    : %s  every %u steps%s\n",
+               kernelInfoFile_.c_str(), kernelInfoStride_,
+               (kernelInfoStride_ == pace_) ? " (default: PACE)" : "");
     if (nlist_)
       log.printf("  [FKERNELABF] neighbor list: cutoff_factor=%.1f skin_factor=%.2f\n",
                  nlistCutFactor_, nlistSkinFactor_);
@@ -1961,19 +1989,8 @@ public:
     }
 
     setBias(V_ex);
-    getPntrToComponent("vbias")->set(0.0);
-    getPntrToComponent("alpha")->set(0.0);
     getPntrToComponent("wamp")->set(V_ex);
     getPntrToComponent("force2")->set(fmag2);
-    getPntrToComponent("lambda")->set(1.0);
-    getPntrToComponent("nkernels")->set((double)M_);
-    getPntrToComponent("nzkernels")->set((double)zM_);
-    getPntrToComponent("vamp")->set(0.0);
-    getPntrToComponent("neff")->set(Neff);
-    { const std::vector<double> sig = currentSigma();
-      for (unsigned i = 0; i < dim_; ++i)
-        getPntrToComponent(sigmaNames_[i])->set(sig[i]); }
-    getPntrToComponent("nlker")->set((double)nlistIdx_.size());
     for (unsigned i = 0; i < dim_; ++i)
       getPntrToComponent(fictNames_[i])->set(s_fict_[i]);
 
@@ -1991,6 +2008,9 @@ public:
     // (L) Restart state (overwritten in place, no backups)
     if (stateStride_ > 0 && M_ > 0 && getStep() % stateStride_ == 0)
       writeState();
+
+    // (M) Kernel diagnostics file (appending time series)
+    if (kernelInfoStride_ > 0) writeKernelInfo();
   }
 };
 
