@@ -62,6 +62,29 @@
 
 
 
+"""
+czar_integrate_improved.py
+
+Python implementation of CZAR gradient integration for FKERNELABF kernel files.
+Reads the kernel file written by forcekernelabf_v5, evaluates the CZAR mean-force
+gradient on a regular grid, then integrates it to recover the free energy landscape
+(FEL) using one of three methods:
+
+  1D : cumulative trapezoidal integration with periodic drift correction.
+  2D (Poisson) : spectral (FFT) solution of the Poisson equation
+                 nabla^2 A = div(czar_grad), using DST/DCT extension for
+                 non-periodic boundaries.
+  2D (WLS)     : weighted least-squares integration via sparse conjugate
+                 gradient, with per-edge weights from the sampling density.
+
+Optional convergence mode (--convergence) scans for snapshot files
+(stem_XXXXXXXX.dat) and computes RMSD of each intermediate FEL against the
+reference, printing a convergence table and plot.
+
+Usage:
+    python czar_integrate_improved.py --czar <file.dat> [options]
+"""
+
 import argparse
 import sys
 import numpy as np
@@ -70,14 +93,20 @@ import numpy as np
 
 
 def parse_czar_file(path):
-    
+    """Parse a FKERNELABF CZAR kernel file and return (meta, kernels).
 
+    The file header contains keyword lines (dim, kT, kappa, periodic, domMin,
+    domMax, nkernels).  Data lines have the form:
+        Nk  center[0] ... center[d-1]  mu[0] ... mu[d-1]  sigma[0] ... sigma[d-1]
 
-
-
-
-
-
+    Returns
+    -------
+    meta : dict
+        Parsed header values including 'dim', 'kT', 'kappa', 'periodic',
+        'domMin', 'domMax'.
+    kernels : list of dict
+        Each dict has keys 'Nk', 'center', 'mu', 'sigma' as numpy arrays.
+    """
     meta = {}
     kernels = []
     dim = None
@@ -134,11 +163,18 @@ def parse_czar_file(path):
 
 
 def build_grid(meta, args):
-    
+    """Build per-dimension coordinate arrays for the evaluation grid.
 
+    Uses domMin/domMax from meta (or command-line overrides) and the requested
+    number of grid points.  For periodic dimensions the endpoint is excluded
+    (linspace endpoint=False) so the grid wraps exactly.
 
-
-
+    Returns
+    -------
+    coords : list of 1-D numpy arrays, one per CV dimension.
+    periodic : bool array of length dim.
+    gmin, gmax : numpy arrays, effective grid bounds.
+    """
     dim = meta['dim']
     periodic = meta.get('periodic', np.zeros(dim, dtype=bool))
     domMin   = meta.get('domMin',   np.zeros(dim))
@@ -166,27 +202,32 @@ def build_grid(meta, args):
 
 
 def periodic_delta(delta, period):
-    
+    """Wrap delta into [-period/2, period/2) for a periodic coordinate."""
     return delta - period * np.round(delta / period)
 
 
 def czar_on_grid(coords, periodic, kernels, kT, nsigma, verbose=False):
-    
+    """Evaluate the CZAR gradient field and biased density on a regular grid.
 
+    For each kernel k, computes the Gaussian weight
+        G_k(z) = exp(-sum_d (dz_d)^2 / (4 sigma_d^2))
+    truncated at nsigma standard deviations, then accumulates:
+        p_tilde(z)    += N_k / prod(sigma) * G_k(z)
+        sum_wkmu(z,d) += w_k(z) * mu_k[d]
+        sum_wkdz(z,d) += w_k(z) * dz_d / (2 sigma_d^2)
 
+    The CZAR gradient is:
+        dA/dz_d = (-sum_wkmu[d] - kT * sum_wkdz[d]) / p_tilde
 
+    Note: sum_wkdz is the kernel-density estimate of d ln p_tilde / dz_d,
+    equivalent to the central finite-difference gradient used in the C++
+    implementation but computed analytically from the kernels.
 
-
-
-
-
-
-
-
-
-
-
-
+    Returns
+    -------
+    ptilde   : ndarray, shape=(*shape,)
+    czar_grad: ndarray, shape=(*shape, dim)
+    """
     dim = len(coords)
     shape = tuple(len(c) for c in coords)
     period = np.zeros(dim)
@@ -273,7 +314,13 @@ def czar_on_grid(coords, periodic, kernels, kT, nsigma, verbose=False):
 
 
 def integrate_1d(grad, dx, periodic):
-    
+    """Integrate a 1-D gradient by cumulative trapezoidal rule.
+
+    For periodic grids, subtracts a linear drift so that A wraps to the same
+    value (i.e., the integral of grad over the full period is zero).
+
+    Returns A with A[0] = 0.
+    """
     from numpy import cumsum
     A = np.zeros_like(grad)
     A[1:] = np.cumsum(0.5 * (grad[:-1] + grad[1:]) * dx)
@@ -288,23 +335,25 @@ def integrate_1d(grad, dx, periodic):
 
 
 def poisson_integrate(czar_grad, coords, periodic):
-    
+    """Solve the Poisson equation nabla^2 A = div(czar_grad) spectrally.
 
+    For non-periodic axes the right-hand side is extended by even reflection
+    (DCT-I boundary conditions) so that the FFT of the extended domain gives the
+    cosine-transform solution.  For periodic axes the standard DFT eigenvalues
+    are used.
 
+    Steps:
+      1. Compute div(czar_grad) using central differences (one-sided at boundaries
+         for non-periodic axes).
+      2. Subtract the mean to satisfy the compatibility condition.
+      3. Extend the domain by even reflection for non-periodic axes.
+      4. FFT, divide by eigenvalues of the discrete Laplacian, IFFT.
+      5. Restrict back to the original domain and shift minimum to zero.
 
-
-
-
-
-
-
-
-
-
-
-
-
-
+    Returns
+    -------
+    A : ndarray, same shape as czar_grad[..., 0], free energy in kJ/mol.
+    """
     dim = len(coords)
     shape = tuple(len(c) for c in coords)
     dx    = np.array([c[1]-c[0] for c in coords])
@@ -404,7 +453,13 @@ def poisson_integrate(czar_grad, coords, periodic):
 
 
 def write_output(path, coords, periodic, ptilde, czar_grad, A, minpop, kT):
-    
+    """Write the full CZAR output file.
+
+    Columns: z0 ... z_{d-1}  czar_grad0 ... czar_grad_{d-1}  ptilde  A_czar[kJ/mol]
+    Grid points below minpop * max(ptilde) are written as NaN for A.
+    A blank line is inserted between rows of the outermost non-final dimension
+    (gnuplot pm3d compatible).
+    """
     dim = len(coords)
     shape = tuple(len(c) for c in coords)
 
@@ -468,26 +523,35 @@ def wls_integrate_2d(
     cg_tol=1e-10,
     cg_maxiter=20000,
 ):
-    
+    """Weighted least-squares integration of a 2-D CZAR gradient field.
 
+    Builds a sparse finite-difference system
+        (Dx^T Wx Dx + Dy^T Wy Dy) A = Dx^T (Wx gx) + Dy^T (Wy gy)
+    where Dx, Dy are forward-difference matrices for the x and y dimensions
+    and Wx, Wy are diagonal weight matrices derived from the sampling density
+    ptilde (low-density edges are down-weighted).
 
+    Optionally adds Tikhonov regularization (Laplacian smoothness penalty) to
+    improve conditioning in sparsely sampled regions.  A gauge constraint is
+    imposed by pinning the highest-weight grid point.
 
+    Parameters
+    ----------
+    czar_grad  : ndarray, shape (nx, ny, 2)
+    coords     : list [x_arr, y_arr]
+    periodic   : bool array, length 2
+    ptilde     : ndarray, shape (nx, ny), optional sampling density
+    minpop     : float, density fraction used for soft masking
+    weight_exp : float, exponent applied to edge weights (default 2)
+    tikhonov   : float, Tikhonov regularization strength
+    cg_tol     : float, conjugate-gradient tolerance
+    cg_maxiter : int,   conjugate-gradient maximum iterations
 
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
+    Returns
+    -------
+    A    : ndarray, shape (nx, ny)
+    info : dict with keys 'cg_info' and 'cg_converged'
+    """
     import numpy as _np
     from scipy import sparse as _sp
     from scipy.sparse.linalg import cg as _cg
@@ -621,7 +685,17 @@ def wls_integrate_2d(
 
 
 def compute_fel(meta, kernels, args, coords, periodic):
-    
+    """Compute the FEL from a set of kernels using the configured integrator.
+
+    Evaluates the CZAR gradient field via czar_on_grid, then integrates using
+    integrate_1d (1-D), wls_integrate_2d (2-D WLS), or poisson_integrate (default).
+
+    Returns
+    -------
+    A     : ndarray, free energy surface
+    mask  : bool ndarray, True where ptilde >= minpop * max(ptilde)
+    ptilde: ndarray, biased sampling density
+    """
     kT = args.kT if args.kT is not None else meta['kT']
     ptilde, czar_grad = czar_on_grid(coords, periodic, kernels, kT,
                                       nsigma=args.nsigma, verbose=False)
@@ -652,11 +726,18 @@ def compute_fel(meta, kernels, args, coords, periodic):
 
 
 def rmsd_convergence(args, coords, periodic, A_ref, mask_ref):
-    
+    """Compute FEL RMSD time series for convergence analysis.
 
+    Scans for snapshot files matching stem_XXXXXXXX.dat in the same directory
+    as args.czar, computes the FEL for each snapshot, aligns it to the reference
+    by subtracting the minimum over the common sampled region, and reports the
+    RMSD over grid points sampled in both the reference and the snapshot.
 
-
-
+    Returns
+    -------
+    steps : list of int
+    rmsds : list of float (RMSD in kJ/mol)
+    """
     import glob, os, re
 
     czar_path = os.path.abspath(args.czar)
@@ -722,6 +803,11 @@ def rmsd_convergence(args, coords, periodic, A_ref, mask_ref):
 
 
 def main():
+    """Parse command-line arguments and run CZAR integration, writing the FEL output.
+
+    Optionally runs convergence analysis (--convergence) and saves a summary
+    diagnostic plot alongside the output file.
+    """
     parser = argparse.ArgumentParser(
         description='Recover FEL from FKERNELABF v5 CZAR kernel file.',
         formatter_class=argparse.RawDescriptionHelpFormatter,

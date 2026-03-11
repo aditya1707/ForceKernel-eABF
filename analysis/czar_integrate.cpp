@@ -25,6 +25,30 @@
 
 
 
+/*
+ * czar_integrate.cpp
+ *
+ * Recovers the free energy landscape (FEL) from a FKERNELABF CZAR kernel file
+ * by evaluating the CZAR mean-force gradient on a regular grid and then
+ * integrating it via a Monte Carlo path-integration scheme.
+ *
+ * CZAR (Corrected z-averaged restraint) estimator:
+ *   dA/dz_d = -<mu_d>_{NW}(z) - kT * d/dz_d ln p_tilde(z)
+ * where <mu_d>_{NW} is the Nadaraya-Watson estimator of the mean force and
+ * p_tilde is the kernel-density estimate of the biased sampling density.
+ *
+ * MC integration: a walker traverses the grid driven by the CZAR gradient
+ * field, accumulating a history bias (WTMetaD-like) until the potential of
+ * mean force converges; the negative bias is returned as A(z).
+ *
+ * Usage:
+ *   czar_integrate <czar_kernels_file> [options]
+ *   czar_integrate <czar_kernels_file> -a -d <output_dir>   (batch snapshots)
+ *
+ * Compile:
+ *   g++ -O2 -std=c++11 -o czar_integrate czar_integrate.cpp
+ */
+
 #include <cstdio>
 #include <cstdlib>
 #include <cmath>
@@ -41,6 +65,11 @@
 
 
 
+// Per-kernel data read from the CZAR file:
+//   Nk     - accumulated weight (number of restraint evaluations contributing)
+//   center - restraint center z_k in collective-variable space
+//   mu     - kernel mean force <f/kappa> at the center
+//   sigma  - kernel bandwidth (standard deviation) per CV dimension
 struct Kernel {
     double Nk;
     std::vector<double> center;
@@ -48,6 +77,9 @@ struct Kernel {
     std::vector<double> sigma;
 };
 
+// Global metadata from the CZAR file header.
+// kappa holds the harmonic spring constants (kJ/mol/unit^2) per dimension;
+// periodic and domMin/domMax define the CV domain boundaries.
 struct Meta {
     int dim;
     double kT;
@@ -58,6 +90,10 @@ struct Meta {
 
 
 
+// Parse a FKERNELABF CZAR kernel file.
+// The file contains a header (dim, kT, kappa, periodic, domMin, domMax)
+// followed by one data line per kernel: Nk  center[d]  mu[d]  sigma[d].
+// Returns false and prints to stderr on any fatal error.
 bool parse_czar_file(const char *path, Meta &meta, std::vector<Kernel> &kernels) {
     std::ifstream fh(path);
     if (!fh.is_open()) {
@@ -134,12 +170,31 @@ bool parse_czar_file(const char *path, Meta &meta, std::vector<Kernel> &kernels)
 
 
 
+// Wrap delta into [-period/2, period/2) for periodic CVs.
 static inline double periodic_delta(double delta, double period) {
     return delta - period * std::round(delta / period);
 }
 
 
 
+// Evaluate the CZAR gradient field and biased density on a regular grid.
+//
+// For each kernel k with center z_k, weight N_k, mean force mu_k, bandwidth sigma_k,
+// the Gaussian contribution G_k(z) = exp(-sum_d dz_d^2 / (4 sigma_d^2)) is accumulated:
+//   p_tilde(z)    += N_k * G_k(z)
+//   sum_wkmu(z,d) += N_k * G_k(z) * mu_k[d]
+//
+// Nadaraya-Watson mean force estimate:
+//   <mu_d>_NW(z) = sum_wkmu(z,d) / p_tilde(z)
+//
+// CZAR gradient (= negative mean force of the FEL):
+//   dA/dz_d = -<mu_d>_NW(z) - kT * d ln p_tilde / dz_d
+//
+// The ln p_tilde gradient is computed by central finite differences
+// (one-sided 2nd-order stencil at non-periodic boundaries).
+//
+// Output: ptilde, czar_grad, grid geometry (sizes/gmin/gmax/dx), and a
+// boolean mask (allowed_out) indicating grid points above the minpop threshold.
 void czar_on_grid(
     const Meta &meta,
     const std::vector<Kernel> &kernels,
@@ -374,8 +429,22 @@ void czar_on_grid(
 
 
 
+// Integrate the CZAR gradient field by Monte Carlo path integration to obtain A(z).
+//
+// Algorithm: a walker on the allowed grid points accumulates a local history
+// bias (hill height 'hill') and proposes random single-step moves accepted by
+// Metropolis-Hastings with energy dA = grad . dz + delta_bias.  The hill is
+// annealed by hill_factor after scale_hill_step steps.
+//
+// Convergence is assessed by comparing the numerical gradient of the current
+// bias field with the target CZAR gradient (RMSD criterion).
+//
+// If nsteps_in == 0, the walk runs until the RMSD relative change falls below
+// convergence_limit (auto-converge mode).
+//
+// Output A is shifted so that its minimum over allowed points equals zero.
 void mc_integrate(
-    const std::vector<double> &grad,   
+    const std::vector<double> &grad,
     const std::vector<bool> &allowed,
     const std::vector<int> &sizes,
     const std::vector<double> &dx,
@@ -597,6 +666,10 @@ void mc_integrate(
 
 
 
+// Write full diagnostic output: grid coordinates, CZAR gradient per dimension,
+// biased density (ptilde), and free energy A (NaN for unsampled points).
+// A blank line is inserted between rows of the innermost grid dimension
+// (gnuplot pm3d format).
 void write_output(const char *path,
                   const Meta &meta,
                   const std::vector<int> &sizes,
@@ -653,6 +726,8 @@ void write_output(const char *path,
 
 
 
+// Write a minimal FEL file containing only grid coordinates and A(z) (in
+// kJ/mol, shifted to zero minimum).  Used for convergence snapshot output.
 void write_simple_fel(const char *path,
                       int dim,
                       const std::vector<int> &sizes,
@@ -700,6 +775,7 @@ void write_simple_fel(const char *path,
 
 
 
+// Split a filesystem path into directory and basename components.
 static void split_path(const std::string &path, std::string &dir, std::string &base) {
     size_t pos = path.find_last_of("/\\");
     if (pos == std::string::npos) {
@@ -713,6 +789,9 @@ static void split_path(const std::string &path, std::string &dir, std::string &b
 
 
 
+// Extract the stem and extension from a basename, stripping any trailing
+// _XXXXXXXX (8-digit) step counter so snapshot files share the same stem as
+// their reference file.
 static void parse_stem_ext(const std::string &base, std::string &stem, std::string &ext) {
     
     size_t dot = base.rfind('.');
@@ -734,6 +813,8 @@ static void parse_stem_ext(const std::string &base, std::string &stem, std::stri
 }
 
 
+// Enumerate all snapshot files in 'dir' matching stem_XXXXXXXX.ext,
+// sorted lexicographically (which is chronological for zero-padded step numbers).
 static std::vector<std::string> find_snapshots(const std::string &dir,
                                                 const std::string &stem,
                                                 const std::string &ext)
@@ -764,6 +845,7 @@ static std::vector<std::string> find_snapshots(const std::string &dir,
 }
 
 
+// Extract the 8-digit step number from a snapshot filename path.
 static long extract_step(const std::string &path, const std::string &ext) {
     
     size_t epos = path.size() - ext.size();
@@ -774,6 +856,9 @@ static long extract_step(const std::string &path, const std::string &ext) {
 
 
 
+// Process every snapshot file found alongside 'reference_path'.
+// For each snapshot: parse kernels, evaluate CZAR grid, MC-integrate, and write
+// a FEL_XXXXXXXX.dat file to fel_dir (or the same directory as the input).
 void process_all_snapshots(const char *reference_path,
                            int grid_pts, double nsigma, double minpop,
                            unsigned int mc_steps, double mc_hill,
@@ -843,8 +928,10 @@ void process_all_snapshots(const char *reference_path,
 
 
 
+// Entry point. Parses command-line options, then either runs batch snapshot
+// processing (-a flag) or processes a single CZAR kernel file.
 int main(int argc, char *argv[]) {
-    
+
     int grid_pts = 100;
     double nsigma = 4.0;
     unsigned int mc_steps = 0;

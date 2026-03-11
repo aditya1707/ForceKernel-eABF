@@ -23,6 +23,21 @@
 
 
 
+"""
+validate_mueller_brown.py
+
+Validates FKERNELABF on the 2-D Müller-Brown benchmark potential.
+
+Computes an exact reference FEL (Boltzmann inversion of the analytical potential),
+runs the CZAR integrator on a CZAR kernel file produced during an FKERNELABF run,
+and optionally computes a reweighted FEL from the COLVAR trajectory.  Results are
+compared at the three known Müller-Brown minima (A, B, C) and printed as a ΔA
+table.  A 2×2 validation figure is saved as mb_validation.png.
+
+Usage:
+    python validate_mueller_brown.py [--czar <file>] [--grid N] [--temp T]
+"""
+
 import argparse, os, sys
 import numpy as np
 
@@ -49,7 +64,13 @@ MINIMA = {
 
 
 def compute_reference_fel(kT, nx=200, ny=200):
-    
+    """Compute the exact Boltzmann-inversion FEL on the Müller-Brown potential.
+
+    Evaluates V(x,y) on a fine grid, clips it at 50 kJ/mol to avoid overflow,
+    computes p = exp(-V/kT), and returns FEL = -kT ln(p/p_max).
+
+    Returns xs, ys (1-D coordinate arrays) and FEL (2-D, shape (ny, nx)).
+    """
     xs = np.linspace(-1.6, 1.3, nx)
     ys = np.linspace(-0.3, 2.1, ny)
     X, Y = np.meshgrid(xs, ys)
@@ -63,10 +84,14 @@ def compute_reference_fel(kT, nx=200, ny=200):
 
 
 def run_czar(czar_file, grid_size, minpop, kT):
-    
+    """Run the CZAR integrator on a kernel file and return the 2-D FEL.
 
+    Imports czar_integrate_improved as 'ci', evaluates the gradient on a fixed
+    Müller-Brown domain grid, integrates via Poisson solver, and masks
+    unsampled regions.
 
-
+    Returns (xs, ys, A_czar, mask) or None on failure.
+    """
     try:
         sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
         import czar_integrate as ci
@@ -107,10 +132,12 @@ def run_czar(czar_file, grid_size, minpop, kT):
 
 
 def reweighted_fel_from_colvar(colvar_path, kT, nx=80, ny=80):
-    
+    """Compute an exp(+V/kT)-reweighted FEL from a PLUMED COLVAR file.
 
-
-
+    Reads cv.x, cv.y, and bias columns.  Weights each frame by exp(bias/kT),
+    then estimates the unbiased density via Gaussian KDE on the Müller-Brown
+    domain grid.  Returns (xs, ys, FEL) or None on failure.
+    """
     try:
         fields, data, _ = _parse_colvar_simple(colvar_path)
     except Exception as e:
@@ -172,7 +199,13 @@ def _parse_colvar_simple(path, stride=5):
 
 
 def extract_minimum_values(xs, ys, A_grid, mask=None):
-    
+    """Look up the FEL value at each known Müller-Brown minimum (A, B, C).
+
+    If a minimum falls on a masked (unsampled) grid point, searches the
+    surrounding radius for the nearest sampled point.
+
+    Returns a dict {name: A_value}.
+    """
     vals = {}
     for name, (mx, my) in MINIMA.items():
         ix = np.argmin(np.abs(xs - mx))
@@ -196,6 +229,10 @@ def extract_minimum_values(xs, ys, A_grid, mask=None):
 
 
 def print_delta_A_table(label, vals, kT, ref_vals=None):
+    """Print a formatted table of FEL values and ΔA differences at the three minima.
+
+    If ref_vals is provided, also prints the error relative to the reference.
+    """
     names = list(MINIMA.keys())
     print(f"\n{label}")
     print(f"  {'Min':4s}  {'A (kJ/mol)':12s}  {'A/kT':6s}", end='')
@@ -227,6 +264,7 @@ def print_delta_A_table(label, vals, kT, ref_vals=None):
 
 
 def main():
+    """Parse arguments and run the full Müller-Brown validation pipeline."""
     parser = argparse.ArgumentParser()
     parser.add_argument('--czar',    default='mb_czar_kernels_00200000.dat')
     parser.add_argument('--grid',    type=int,   default=80)

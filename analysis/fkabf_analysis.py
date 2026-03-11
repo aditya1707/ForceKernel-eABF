@@ -59,6 +59,25 @@
 
 
 
+"""
+fkabf_analysis.py
+
+Post-processing analysis and report generation for FKERNELABF runs.
+
+Reads a PLUMED COLVAR file and, optionally, FKERNELABF kernel snapshot files,
+then produces a multi-page PDF diagnostic report covering:
+
+  - CV time series and histograms (per dimension)
+  - Fictitious-particle gap (z_fict - z_real) traces
+  - Kernel count, effective sample size (Neff), bandwidth (sigma) evolution
+  - Kernel mean-force (mu) magnitude distribution vs time
+  - Bias energy (V_amp) and kernel amplitude (W_amp) traces
+  - 2-D density and FEL surfaces (for 2-D CV runs)
+  - Kernel scatter / ellipse overlays at selected time points
+
+Usage:
+    python fkabf_analysis.py --colvar COLVAR [--kernels <file_or_dir>] [options]
+"""
 import argparse
 import glob
 import os
@@ -73,11 +92,17 @@ warnings.filterwarnings('ignore')
 
 
 def parse_colvar(path, stride=1):
-    
+    """Parse a PLUMED COLVAR file produced by FKERNELABF.
 
+    Reads '#! FIELDS' column headers and '#! SET min_*/max_*' periodic-boundary
+    annotations, then loads all numeric data rows (strided by 'stride').
 
-
-
+    Returns
+    -------
+    fields       : list of str, column names
+    data         : (N, ncols) float array
+    periodic_info: dict mapping CV name -> (lo, hi) for periodic CVs
+    """
     fields = None
     rows = []
     set_vals = {}
@@ -135,23 +160,21 @@ def parse_colvar(path, stride=1):
 
 
 def _parse_single_kernel_file(path):
-    
+    """Parse one FKERNELABF kernel snapshot file.
 
+    The file may contain multiple snapshot blocks delimited by comment lines
+    containing 'snapshot step=N M=N totalN=N'.  Each block has:
+      - A metadata line with neff(Silverman), sigma, Vamp, <lambda>.
+      - A column-header comment listing CV names (c_<name>).
+      - One data line per kernel: idx Nk center[d] mu[d] sigma[d] mu_mag wt.
 
-
-
-
-
-
-
-
-
-
-
-
-
-
-
+    Returns
+    -------
+    snapshots : list of dicts, one per snapshot block, each with keys:
+                'step', 'M', 'totalN', 'neff', 'sigma', 'vamp',
+                'lambda_mean', 'kernels' (list of per-kernel dicts).
+    cvnames   : list of CV name strings extracted from the header.
+    """
     snapshots = []
     current = None
     cvnames = None
@@ -251,17 +274,23 @@ def _parse_single_kernel_file(path):
 
 
 def load_kernel_snapshots(kernels_arg):
-    
+    """Load kernel snapshots from a file, glob pattern, or directory.
 
+    Accepts:
+      - A single .dat file path.
+      - A glob pattern (containing * or ?).
+      - A directory (searches for *kernels_*.dat inside).
 
+    Files are sorted by step number extracted from the filename.  Duplicate
+    steps (e.g., from overlapping snapshot files) are deduplicated, keeping
+    the last occurrence.
 
-
-
-
-
-
-
-    
+    Returns
+    -------
+    snapshots : list of snapshot dicts (sorted by step), same format as
+                _parse_single_kernel_file.
+    cvnames   : list of CV name strings.
+    """
     if os.path.isdir(kernels_arg):
         
         patterns = [
@@ -320,7 +349,10 @@ def load_kernel_snapshots(kernels_arg):
 
 
 def find_col(fields, patterns):
-    
+    """Return the index of the first field whose name contains any pattern (case-insensitive).
+
+    Returns None if no match is found.
+    """
     for pat in patterns:
         for i, f in enumerate(fields):
             if pat.lower() in f.lower():
@@ -329,7 +361,7 @@ def find_col(fields, patterns):
 
 
 def find_cols(fields, patterns):
-    
+    """Return indices of all fields whose names contain any of patterns (case-insensitive)."""
     result = []
     for i, f in enumerate(fields):
         if any(p.lower() in f.lower() for p in patterns):
@@ -340,6 +372,28 @@ def find_cols(fields, patterns):
 
 
 def make_report(fields, data, snapshots, cvnames_kern, args, periodic_info=None):
+    """Generate the full multi-page PDF diagnostic report.
+
+    Produces a PdfPages document containing all analysis figures.  Each figure
+    is saved into the PDF and then closed to manage memory.
+
+    The report includes (depending on available data):
+      - Time-series panels for each CV (real and fictitious particle)
+      - Fictitious-particle gap traces and histograms
+      - Kernel-count, Neff, sigma, and mu_mag evolution
+      - V_amp and W_amp bias traces
+      - 2-D FEL and density panels (for 2-D FKERNELABF runs)
+      - Kernel scatter / ellipse overlays at selected simulation stages
+
+    Parameters
+    ----------
+    fields        : list of column names from parse_colvar
+    data          : (N, ncols) float array of COLVAR data
+    snapshots     : list of kernel snapshot dicts from load_kernel_snapshots
+    cvnames_kern  : list of CV names from the kernel file
+    args          : parsed argparse.Namespace with all run settings
+    periodic_info : dict of periodic CV ranges {cv_name: (lo, hi)}
+    """
     import matplotlib
     matplotlib.use('Agg' if not args.show else 'TkAgg')
     import matplotlib.pyplot as plt
@@ -1074,6 +1128,7 @@ def make_report(fields, data, snapshots, cvnames_kern, args, periodic_info=None)
 
 
 def main():
+    """Parse command-line arguments and run the FKERNELABF analysis report."""
     parser = argparse.ArgumentParser(
         description='Analysis report for FKERNELABF v3+ simulations.',
         formatter_class=argparse.RawDescriptionHelpFormatter,
