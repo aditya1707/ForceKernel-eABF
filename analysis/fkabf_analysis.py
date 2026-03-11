@@ -371,7 +371,8 @@ def find_cols(fields, patterns):
 
 
 
-def make_report(fields, data, snapshots, cvnames_kern, args, periodic_info=None):
+def make_report(fields, data, snapshots, cvnames_kern, args, periodic_info=None,
+                ki_fields=None, ki_data=None):
     """Generate the full multi-page PDF diagnostic report.
 
     Produces a PdfPages document containing all analysis figures.  Each figure
@@ -451,14 +452,24 @@ def make_report(fields, data, snapshots, cvnames_kern, args, periodic_info=None)
         kappas = (kappas * ndim)[:ndim]
 
     
-    vamp_col   = find_col(fields, ['vamp'])
+    # COLVAR columns (trajectory quantities only)
     wamp_col   = find_col(fields, ['wamp'])
-    vbias_col  = find_col(fields, ['vbias'])
-    nker_col   = find_col(fields, ['nkernels'])
-    nzker_col  = find_col(fields, ['nzkernels'])
-    sig_cols   = find_cols(fields, ['sigma'])
-    neff_col   = find_col(fields, ['neff'])
     force2_col = find_col(fields, ['force2'])
+
+    # Diagnostic columns — exclusively from KERNELINFO file (--kernelinfo)
+    # Not in COLVAR; if --kernelinfo not provided these plots are skipped.
+    if ki_data is None:
+        print("  NOTE: --kernelinfo not provided; kernel diagnostic plots "
+              "(M, neff, sigma) will be skipped. "
+              "Pass --kernelinfo KERNELINFO to include them.", flush=True)
+    _step_col = find_col(ki_fields, ['step']) if ki_fields is not None else None
+    ki_time   = (ki_data[:, _step_col] * args.dt
+                 if ki_data is not None and _step_col is not None
+                 else None)
+    nker_col  = find_col(ki_fields,  ['nkernels', 'M']) if ki_fields is not None else None
+    nzker_col = find_col(ki_fields,  ['nzkernels', 'zM']) if ki_fields is not None else None
+    sig_cols  = find_cols(ki_fields, ['sigma']) if ki_fields is not None else []
+    neff_col  = find_col(ki_fields,  ['neff']) if ki_fields is not None else None
 
     
     have_kernels = len(snapshots) > 0
@@ -547,16 +558,15 @@ def make_report(fields, data, snapshots, cvnames_kern, args, periodic_info=None)
         wamp_ts = data[:, wamp_col] if wamp_col is not None else None
 
         
+        # diag_items: (label, col, color, data_arr, time_arr)
         diag_items = []
-        if vamp_col   is not None: diag_items.append(('V(λ) grid amplitude Vamp (kJ/mol)', vamp_col,   'darkorange'))
-        if neff_col   is not None: diag_items.append(('Neff at λ position',                neff_col,   'seagreen'))
-        if force2_col is not None: diag_items.append(('Bias |F|² (kJ/mol/rad)²',           force2_col, 'crimson'))
-        if sig_col    is not None: diag_items.append(('Silverman σ (dim 0)',                sig_col,    'purple'))
+        if neff_col   is not None: diag_items.append(('Neff at λ position',       neff_col,    'seagreen', ki_data, ki_time))
+        if force2_col is not None: diag_items.append(('Bias |F|² (kJ/mol/rad)²', force2_col,  'crimson',  data,    time))
+        if sig_cols:               diag_items.append(('Silverman σ (dim 0)',      sig_cols[0], 'purple',   ki_data, ki_time))
 
         
-        have_explore_diag = (wamp_ts is not None or vbias_col is not None)
-        n_explore_rows = 1 if (gamma > 1.0 and have_explore_diag) else (
-                         1 if (vbias_col is not None) else 0)
+        have_explore_diag = wamp_ts is not None
+        n_explore_rows = 1 if have_explore_diag else 0
 
         n_rows = len(diag_items) + n_explore_rows
         if n_rows > 0:
@@ -566,12 +576,11 @@ def make_report(fields, data, snapshots, cvnames_kern, args, periodic_info=None)
             if n_rows == 1: axes = [axes]
             fig.suptitle('Scalar Diagnostics Over Time', fontsize=13)
 
-            def plot_ts(ax, y, color, label=None):
-                ax.plot(time, y, lw=0.6, color=color, alpha=0.85, label=label)
+            def plot_ts(ax, t, y, color, label=None):
+                ax.plot(t, y, lw=0.6, color=color, alpha=0.85, label=label)
 
-            
-            for ax, (label, col, color) in zip(axes, diag_items):
-                plot_ts(ax, data[:, col], color)
+            for ax, (label, col, color, d_arr, t_arr) in zip(axes, diag_items):
+                plot_ts(ax, t_arr, d_arr[:, col], color)
                 ax.set_ylabel(label, fontsize=9)
                 ax.legend(fontsize=7, loc='upper right')
                 ax.grid(True, alpha=0.3)
@@ -581,10 +590,7 @@ def make_report(fields, data, snapshots, cvnames_kern, args, periodic_info=None)
             
             if have_explore_diag and n_explore_rows >= 1:
                 ax = axes[row]
-                if vbias_col is not None:
-                    plot_ts(ax, data[:, vbias_col], 'darkorange', label='V(λ) at s_fict (kJ/mol)')
-                if wamp_ts is not None:
-                    plot_ts(ax, wamp_ts, 'royalblue', label='V_ex (kJ/mol)')
+                plot_ts(ax, time, wamp_ts, 'royalblue', label='V_ex (kJ/mol)')
                 ax.set_ylabel('Bias potential at s_fict (kJ/mol)', fontsize=9)
                 ax.legend(fontsize=7, loc='upper left')
                 ax.grid(True, alpha=0.3)
@@ -597,15 +603,16 @@ def make_report(fields, data, snapshots, cvnames_kern, args, periodic_info=None)
         
         
         
-        if nker_col is not None or nzker_col is not None or sig_col is not None:
+        if nker_col is not None or nzker_col is not None or sig_cols:
+            _t = ki_time if ki_time is not None else time
             fig, axes = plt.subplots(2, 1, figsize=(14, 7), sharex=True)
             fig.suptitle('Kernel Population & Bandwidth', fontsize=13)
 
             ax = axes[0]
             if nker_col is not None:
-                ax.plot(time, data[:,nker_col],  lw=0.8, color='steelblue', label='M (λ-kernels)')
+                ax.plot(_t, ki_data[:,nker_col],  lw=0.8, color='steelblue', label='M (λ-kernels)')
             if nzker_col is not None:
-                ax.plot(time, data[:,nzker_col], lw=0.8, color='tomato',    label='zM (z-kernels)', alpha=0.7)
+                ax.plot(_t, ki_data[:,nzker_col], lw=0.8, color='tomato',    label='zM (z-kernels)', alpha=0.7)
             ax.set_ylabel('Kernel count')
             ax.legend(fontsize=9)
             ax.grid(True, alpha=0.3)
@@ -614,8 +621,8 @@ def make_report(fields, data, snapshots, cvnames_kern, args, periodic_info=None)
             if sig_cols:
                 colors = ['purple', 'darkorange', 'seagreen']
                 for j, sc in enumerate(sig_cols[:3]):
-                    ax.plot(time, data[:,sc], lw=0.8, color=colors[j],
-                            label=fields[sc], alpha=0.8)
+                    ax.plot(_t, ki_data[:,sc], lw=0.8, color=colors[j],
+                            label=ki_fields[sc], alpha=0.8)
             ax.set_ylabel('Silverman σ')
             ax.set_xlabel('Time (ps)')
             ax.legend(fontsize=9)
@@ -662,38 +669,6 @@ def make_report(fields, data, snapshots, cvnames_kern, args, periodic_info=None)
             FEL_smooth = None
             FEL_biased = None
 
-            if vbias_col is not None:
-                vb = data[:, vbias_col]
-                sum_v = np.zeros((n_bin, n_bin))
-                count_v = np.zeros((n_bin, n_bin))
-                for t in range(len(z0)):
-                    i = min(max(int((z0[t] - lo0) / dx0), 0), n_bin - 1)
-                    j = min(max(int((z1[t] - lo1) / dx1), 0), n_bin - 1)
-                    sum_v[i, j] += -vb[t]  
-                    count_v[i, j] += 1
-
-                raw = np.where(count_v > 0, sum_v / count_v, np.nan)
-
-                
-                try:
-                    from scipy.ndimage import generic_filter, gaussian_filter
-                    raw_pad = np.tile(raw, (3, 3))
-                    mask_nan = ~np.isfinite(raw_pad)
-                    filled = raw_pad.copy()
-                    for _ in range(5):
-                        filled2 = generic_filter(filled, _nanmean, size=3,
-                                                 mode='constant', cval=np.nan)
-                        filled[mask_nan] = filled2[mask_nan]
-                        mask_nan = ~np.isfinite(filled)
-                        if not mask_nan.any():
-                            break
-                    smoothed = gaussian_filter(filled, sigma=1.5, mode='wrap')
-                    FEL_smooth = smoothed[n_bin:2*n_bin, n_bin:2*n_bin]
-                    FEL_smooth -= FEL_smooth.min()
-                except ImportError:
-                    
-                    FEL_smooth = raw.copy()
-                    FEL_smooth -= np.nanmin(FEL_smooth)
 
             
             h, _, _ = np.histogram2d(z0, z1, bins=n_bin,
@@ -982,7 +957,7 @@ def make_report(fields, data, snapshots, cvnames_kern, args, periodic_info=None)
 
                     
                     
-                    have_flood_cols = (vbias_col is not None or wamp_col is not None)
+                    have_flood_cols = wamp_col is not None
                     ncols = 3 if have_flood_cols else 2
                     fig, axes = plt.subplots(2, ncols, figsize=(6*ncols, 8))
                     fig.suptitle('Kernel Snapshot Evolution', fontsize=13)
@@ -1011,10 +986,6 @@ def make_report(fields, data, snapshots, cvnames_kern, args, periodic_info=None)
 
                     
                     ax = axes[1,1]
-                    if vbias_col is not None:
-                        ax.plot(time, data[:, vbias_col], lw=0.8,
-                                color='darkorange', alpha=0.85,
-                                label='V(λ) at s_fict')
                     if wamp_ts is not None:
                         ax.plot(time, wamp_ts, lw=0.8,
                                 color='royalblue', alpha=0.85,
@@ -1026,30 +997,18 @@ def make_report(fields, data, snapshots, cvnames_kern, args, periodic_info=None)
                     ax.grid(True, alpha=0.3)
 
                     if ncols == 3:
-                        
                         ax = axes[0,2]
-                        if vamp_col is not None:
-                            ax.plot(time, data[:, vamp_col], lw=0.8,
-                                    color='darkorange', alpha=0.85,
-                                    label='Vamp = max(V)−min(V)')
-                        ax.set_ylabel('Grid amplitude (kJ/mol)')
-                        ax.set_title('V(λ) grid amplitude Vamp')
+                        if wamp_col is not None:
+                            ax.plot(time, data[:, wamp_col], lw=0.8,
+                                    color='royalblue', alpha=0.85,
+                                    label='V_ex at s_fict (kJ/mol)')
+                        ax.set_ylabel('V_ex (kJ/mol)')
+                        ax.set_title('Exploration potential V_ex')
                         ax.legend(fontsize=7)
                         ax.grid(True, alpha=0.3)
 
-                        
                         ax = axes[1,2]
-                        if wamp_ts is not None and vamp_col is not None:
-                            vamp_ts = data[:, vamp_col]
-                            safe_vamp = np.where(vamp_ts > 0.1, vamp_ts, np.nan)
-                            ratio_ts = wamp_ts / safe_vamp
-                            ax.plot(time, ratio_ts, lw=0.6, color='teal', alpha=0.85,
-                                    label='V_ex / Vamp')
-                        ax.set_ylabel('V_ex / Vamp')
-                        ax.set_xlabel('Time (ps)')
-                        ax.set_title('Exploration/ABF ratio (sweet spot: 0.3–1.0)')
-                        ax.legend(fontsize=7, loc='upper right')
-                        ax.grid(True, alpha=0.3)
+                        ax.set_visible(False)
 
                     plt.tight_layout()
                     pdf.savefig(fig, bbox_inches='tight')
@@ -1098,18 +1057,14 @@ def make_report(fields, data, snapshots, cvnames_kern, args, periodic_info=None)
                     lines.append(f'  {cvn} coupling gap (rad): mean={np.mean(gap):.5f}  '
                                  f'std={np.std(gap):.5f}')
         lines += ['']
-        if vamp_col is not None:
-            lines.append(f'Final Vamp:           {data[-1, vamp_col]:.2f} kJ/mol  [V(λ) grid amplitude]')
-        if vbias_col is not None:
-            lines.append(f'Final V(λ) at s_fict: {data[-1, vbias_col]:.2f} kJ/mol')
         if wamp_ts is not None:
             lines.append(f'Final V_ex:           {wamp_ts[-1]:.2f} kJ/mol')
         if nker_col is not None:
-            lines.append(f'Final M:              {int(data[-1, nker_col])}')
+            lines.append(f'Final M:              {int(ki_data[-1, nker_col])}')
         if nzker_col is not None:
-            lines.append(f'Final zM:             {int(data[-1, nzker_col])}')
-        if sig_col is not None:
-            lines.append(f'Final σ (dim 0):      {data[-1, sig_col]:.5f}')
+            lines.append(f'Final zM:             {int(ki_data[-1, nzker_col])}')
+        if sig_cols:
+            lines.append(f'Final σ (dim 0):      {ki_data[-1, sig_cols[0]]:.5f}')
         if have_kernels:
             lines.append(f'Kernel snapshots:     {len(snapshots)}')
 
@@ -1147,6 +1102,10 @@ def main():
                         help='BIASFACTOR γ used in the simulation (default 1.0 = pure ABF). '
                              'If γ > 1, activates exploration diagnostics (V_ex panel).')
     parser.add_argument('--dt',          type=float, default=0.002,help='MD timestep (ps)')
+    parser.add_argument('--kernelinfo',  default=None,
+                        help='Kernel diagnostics file ({label}.kernelinfo.dat). '
+                             'When provided, M/zM/neff/sigma/nlker plots use this '
+                             'file instead of COLVAR columns, allowing a lean COLVAR.')
     parser.add_argument('--show',        action='store_true',      help='Show interactively')
     args = parser.parse_args()
 
@@ -1158,6 +1117,11 @@ def main():
     print(f"Reading COLVAR: {args.colvar}", flush=True)
     fields, data, periodic_info = parse_colvar(args.colvar, stride=args.stride)
 
+    ki_fields, ki_data = None, None
+    if args.kernelinfo:
+        print(f"Reading kernel info: {args.kernelinfo}", flush=True)
+        ki_fields, ki_data, _ = parse_colvar(args.kernelinfo)
+
     snapshots = []
     cvnames_kern = []
     if args.kernels:
@@ -1165,7 +1129,8 @@ def main():
         snapshots, cvnames_kern = load_kernel_snapshots(args.kernels)
 
     print("Generating report ...", flush=True)
-    make_report(fields, data, snapshots, cvnames_kern, args, periodic_info)
+    make_report(fields, data, snapshots, cvnames_kern, args, periodic_info,
+                ki_fields=ki_fields, ki_data=ki_data)
 
 
 if __name__ == '__main__':
