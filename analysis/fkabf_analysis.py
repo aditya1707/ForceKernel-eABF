@@ -456,7 +456,7 @@ def make_report(fields, data, snapshots, cvnames_kern, args, periodic_info=None)
     vbias_col  = find_col(fields, ['vbias'])
     nker_col   = find_col(fields, ['nkernels'])
     nzker_col  = find_col(fields, ['nzkernels'])
-    sig_col    = find_col(fields, ['sigma'])
+    sig_cols   = find_cols(fields, ['sigma'])
     neff_col   = find_col(fields, ['neff'])
     force2_col = find_col(fields, ['force2'])
 
@@ -611,14 +611,11 @@ def make_report(fields, data, snapshots, cvnames_kern, args, periodic_info=None)
             ax.grid(True, alpha=0.3)
 
             ax = axes[1]
-            if sig_col is not None:
-                ax.plot(time, data[:,sig_col], lw=0.8, color='purple', label='σ (dim 0)')
-                if args.cvnames and len(args.cvnames) > 0:
-                    sig_cols_all = find_cols(fields, ['sigma'])
-                    colors = ['purple','darkorange','seagreen']
-                    for j, sc in enumerate(sig_cols_all[:3]):
-                        lbl = fields[sc]
-                        ax.plot(time, data[:,sc], lw=0.8, color=colors[j], label=lbl, alpha=0.8)
+            if sig_cols:
+                colors = ['purple', 'darkorange', 'seagreen']
+                for j, sc in enumerate(sig_cols[:3]):
+                    ax.plot(time, data[:,sc], lw=0.8, color=colors[j],
+                            label=fields[sc], alpha=0.8)
             ax.set_ylabel('Silverman σ')
             ax.set_xlabel('Time (ps)')
             ax.legend(fontsize=9)
@@ -965,8 +962,10 @@ def make_report(fields, data, snapshots, cvnames_kern, args, periodic_info=None)
                     snap_M      = [s['M']        for s in snapshots if s['M']>0]
                     snap_neff   = [s['neff']     for s in snapshots
                                    if s['M']>0 and s['neff'] is not None]
-                    snap_sigma  = [s['sigma'][0] for s in snapshots
-                                   if s['M']>0 and s['sigma']]
+                    ndims_sig   = max((len(s['sigma']) for s in snapshots
+                                       if s['M']>0 and s['sigma']), default=1)
+                    snap_sigma  = [[s['sigma'][d] for s in snapshots if s['M']>0 and s['sigma']]
+                                   for d in range(ndims_sig)]
                     snap_vamp   = [s['vamp']     for s in snapshots
                                    if s['M']>0 and s['vamp'] is not None]
 
@@ -1002,8 +1001,10 @@ def make_report(fields, data, snapshots, cvnames_kern, args, periodic_info=None)
                     axes[0,1].set_ylabel('neff'); axes[0,1].set_title('Effective kernel count')
                     axes[0,1].grid(True, alpha=0.3)
 
-                    splot(axes[1,0], snap_steps[:len(snap_sigma)], snap_sigma,
-                          'σ dim 0', 'purple')
+                    sig_colors = ['purple', 'darkorange', 'seagreen']
+                    for d, sigma_d in enumerate(snap_sigma[:3]):
+                        splot(axes[1,0], snap_steps[:len(sigma_d)], sigma_d,
+                              f'σ dim {d}', sig_colors[d])
                     axes[1,0].set_ylabel('σ'); axes[1,0].set_xlabel('Time (ps)')
                     axes[1,0].set_title('Silverman bandwidth')
                     axes[1,0].grid(True, alpha=0.3)
