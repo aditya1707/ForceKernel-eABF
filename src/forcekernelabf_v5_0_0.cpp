@@ -148,6 +148,7 @@ private:
 
   // --- state ---
   std::vector<std::string> fictNames_;
+  std::vector<std::string> sigmaNames_;
 
   // ================ helpers ================
   double sq(double x) const { return x * x; }
@@ -1421,7 +1422,7 @@ public:
     keys.addOutputComponent("alpha",     "default","reserved (always 0 in v3+; kept for COLVAR compatibility)");
     keys.addOutputComponent("wamp",      "default","exploration potential V_ex = c·ln(1+Z/Z₀) at s_fict (kJ/mol); 0 when γ=1");
     keys.addOutputComponent("neff",      "default","NW-weighted effective sample count at current s_fict");
-    keys.addOutputComponent("sigma",     "default","current Silverman bandwidth dim 0");
+    keys.addOutputComponent("_sigma",    "default","current Silverman bandwidth for each CV dimension");
     keys.addOutputComponent("nlker",     "default","number of lambda-kernels in neighbor list");
     keys.addOutputComponent("_fict",     "default","fictitious variable position from extended Lagrangian");
   }
@@ -1667,8 +1668,14 @@ public:
     addComponent("alpha");    componentIsNotPeriodic("alpha");
     addComponent("wamp");     componentIsNotPeriodic("wamp");
     addComponent("neff");     componentIsNotPeriodic("neff");
-    addComponent("sigma");    componentIsNotPeriodic("sigma");
     addComponent("nlker");    componentIsNotPeriodic("nlker");
+
+    sigmaNames_.resize(dim_);
+    for (unsigned i = 0; i < dim_; ++i) {
+      sigmaNames_[i] = getPntrToArgument(i)->getName() + "_sigma";
+      addComponent(sigmaNames_[i]);
+      componentIsNotPeriodic(sigmaNames_[i]);
+    }
 
     fictNames_.resize(dim_);
     for (unsigned i = 0; i < dim_; ++i) {
@@ -1963,7 +1970,9 @@ public:
     getPntrToComponent("nzkernels")->set((double)zM_);
     getPntrToComponent("vamp")->set(0.0);
     getPntrToComponent("neff")->set(Neff);
-    getPntrToComponent("sigma")->set(currentSigma()[0]);
+    { const std::vector<double> sig = currentSigma();
+      for (unsigned i = 0; i < dim_; ++i)
+        getPntrToComponent(sigmaNames_[i])->set(sig[i]); }
     getPntrToComponent("nlker")->set((double)nlistIdx_.size());
     for (unsigned i = 0; i < dim_; ++i)
       getPntrToComponent(fictNames_[i])->set(s_fict_[i]);
