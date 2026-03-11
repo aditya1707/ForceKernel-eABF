@@ -454,7 +454,6 @@ def make_report(fields, data, snapshots, cvnames_kern, args, periodic_info=None,
     
     # COLVAR columns (trajectory quantities only)
     wamp_col   = find_col(fields, ['wamp'])
-    nker_col   = find_col(fields, ['nkernels'])
     force2_col = find_col(fields, ['force2'])
 
     # Diagnostic columns — exclusively from KERNELINFO file (--kernelinfo)
