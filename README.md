@@ -123,6 +123,12 @@ plumed pesmd < pesmd.in
 
 This runs the simulation defined in `pesmd.in` (10M steps on the 2D Müller-Brown potential) driven by `plumed.dat`, and writes CZAR kernel dump files at the configured stride.
 
+<br>
+
+---
+
+<br>
+
 ### 3. Recover the free energy landscape
 
 Compile 'czar_integrate.cpp':
@@ -186,7 +192,13 @@ czar_integrate only requires one argument: the directory for depositing the PMFs
 
 Points below the population threshold are written as `nan`. For 2D+ grids, blank lines separate slices along the first dimension (gnuplot `pm3d` compatible).
 
-### 4. Recover the free energy landscape
+<br>
+
+---
+
+<br>
+
+### 4. Additional diagnosis 
 
 As an additional diagnostic tool, fkabf_diagnostics.py can be used to process the COLVAR file and the KERNELINFO file in the current directory:
 ```bash
