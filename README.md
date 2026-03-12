@@ -16,7 +16,7 @@ FKERNELABF is an adaptive biasing force method that uses an extended Lagrangian 
 
 ## Workflow
 
-### 1. Run the simulation
+### 1. Setting up a FKABF simulation
 
 The plugin is loaded at runtime via the PLUMED `LOAD` directive — no recompilation of PLUMED is required. Configure your `plumed.dat` to load the plugin and define the `FKERNELABF` action:
 
@@ -53,34 +53,6 @@ PRINT FILE=COLVAR STRIDE=500 ARG=*
 ```
 
 Alternatively, it is possible for FKABF to set its own options, where an adaptive sigma is determined based on 10xPACE (or set with 'ADAPTIVE_SIGMA_STRIDE'), and the default data aquisition (PACE) and force-field update frequency (GRIDPACE) are often sufficient for learning the gradient in classical simulations.
-
-```plumed
-LOAD FILE=./forcekernelabf_v5_0_0.cpp
-
-cv: <YOUR_CV_DEFINITION>
-
-fk: FKERNELABF ...
-    
-    # CV Definition
-    ARG=cv
-
-    # Extended Lagrangian Options
-    KAPPA=3000.0          # coupling spring constant (kJ/mol/nm^2)
-    TAU=0.5               # fictitious particle time constant (ps)
-    FRICTION=8.0          # Langevin friction (ps^-1)
-    TEMP=300              # temperature (K)
-
-    #FKABF Options
-    GRIDMIN=-1.5          # CV domain lower bound
-    GRIDMAX=1.5           # CV domain upper bound
-
-    # Output options
-    CZARSTRIDE=50000      # steps between CZAR kernel file writes
-    KERNELINFOSTRIDE=500  # steps for writing kernel information  
-...
-
-PRINT FILE=COLVAR STRIDE=500 ARG=*
-```
 
 ### Compulsory Keywords
 
@@ -136,7 +108,7 @@ All filenames are derived from the PLUMED action label (e.g., `fk: FKERNELABF ..
 | `KERNELINFOSTRIDE` | `PACE` | Append one line of kernel diagnostics every N steps → `KERNELINFO`. Columns: step, M, zM, neff, σ per CV, nlker. |
 
 
-
+### 2. Running the simulation
 
 For the included Müller-Brown benchmark, run the exaple input using PLUMED's built-in 2D toy integrator (`pesmd`) with the provided input files:
 
@@ -146,7 +118,7 @@ plumed pesmd < pesmd.in
 
 This runs the simulation defined in `pesmd.in` (10M steps on the 2D Müller-Brown potential) driven by `plumed.dat`, and writes CZAR kernel dump files at the configured stride.
 
-### 2. Recover the free energy landscape
+### 3. Recover the free energy landscape
 
 Compile 'czar_integrate.cpp':
 
@@ -157,36 +129,104 @@ Compile 'czar_integrate.cpp':
 The executable can now be used to process the czar_kernel files: 
 
 ```bash
-./czar_integrate FEL_snapshots -d /path/to/scan' 
+./czar_integrate FEL_snapshots -d /path/to/scan
 ```
-will read files in the directory '-d' and will process all kenel files, depositing the resulting PMFs into the specified directory
+czar_integrate only requires one argument: the directory for depositing the PMFs. Else, czar_integrate can read files in a specified directory (-d) and for all files matching `*czar_kernels_XXXXXXXX.dat`, integrates, and writes `FEL_XXXXXXXX.dat` to the output directory.
+
+### Options
+
+| Flag | Argument | Default | Description |
+|------|----------|---------|-------------|
+| `-n` | `<steps>` | `0` | MC integration steps. `0` = auto-converge (stop when RMSD stabilises). |
+| `-h` | `<height>` | `0.01` | Initial hill height for the MC bias potential. |
+| `-f` | `<factor>` | `0.5` | Hill reduction factor. Hill is multiplied by this at regular intervals after a warmup period. |
+| `-t` | `<kT>` | *(from file)* | Override kT from the kernel file header (kJ/mol). |
+| `-g` | `<pts>` | `100` | Grid points per dimension for the integration grid. |
+| `-s` | `<nsigma>` | `4.0` | Kernel cutoff in σ units. Kernels beyond this distance are skipped. |
+| `-m` | `<minpop>` | `1e-3` | Minimum density fraction for the allowed region. Grid points with density below `minpop × max(density)` are masked as NaN in the output. |
+| `-d` | `<dir>` | `.` | Directory to scan for kernel snapshot files (batch mode). |
+| `-i` | `<file>` | — | Process a single kernel file instead of scanning. |
+| `-o` | `<file>` | `FEL_czar.dat` | Output filename (single-file mode only). |
+| `-v` | — | off | Verbose: print per-step RMSD, hill scaling, and convergence diagnostics. |
+
+### Examples
 
 ```bash
-python czar_integrate_improved.py --czar czar_kernels.dat --grid 100 --output FEL.dat
+# Batch: scan current directory, write FEL snapshots
+./czar_integrate FEL_snapshots
+
+# Batch with fixed MC steps and user-specified height
+./czar_integrate FEL_snapshots -n 5000000 -h 0.2
+
+# Batch: scan a different directory
+./czar_integrate FEL_snapshots -d /path/to/run
+
+# Single file processing
+./czar_integrate -i fk.czar_kernels_10000000.dat -o PMF.dat
+
+# Fine grid, verbose
+./czar_integrate FEL_snapshots -g 150 -v
 ```
 
-Key options:
+### Output Format
 
-Options:
-  -n <steps>      MC integration steps (0 = auto-converge) [0]
-  -h <height>     Initial hill height                      [0.01]
-  -f <factor>     Hill reduction factor                    [0.5]
-  -t <kT>         Override kT from file (kJ/mol)
-  -g <pts>        Grid points per dimension                [100]
-  -s <nsigma>     Kernel cutoff in sigma units             [4.0]
-  -m <minpop>     Min density fraction for allowed region  [1e-3]
-  -d <dir>        Directory to scan (default: current)     [.]
-  -i <file>       Single-file mode (skip auto-scan)
-  -o <file>       Output file for single-file mode         [FEL_czar.dat]
-  -v              Verbose output
+**Single-file mode** (`-i`): a space-separated file with columns:
 
-Examples:
-  ./czar_integrate FEL_snapshots                 # scan ., write to FEL_snapshots/
-  ./czar_integrate FEL_snapshots -n 5000000      # fixed MC steps
-  ./czar_integrate FEL_snapshots -d /path/to/run # scan another directory
-  ./czar_integrate -i fk.czar_kernels_10000000.dat -o PMF.dat  # single file
+| Column | Description |
+|--------|-------------|
+| `z0`, `z1`, ... | Grid coordinates (one per CV dimension) |
+| `czar_grad0`, `czar_grad1`, ... | CZAR free-energy gradient components (kJ/mol/unit) |
+| `ptilde` | Biased density (NW denominator) at each grid point |
+| `A_czar` | Free energy (kJ/mol), shifted so the minimum is zero |
 
-The output is a space-separated file with CV coordinates, CZAR gradients, biased density, and free energy (kJ/mol; plumed default). Points below the population threshold are written as NaN.
+Points below the population threshold are written as `nan`. For 2D+ grids, blank lines separate slices along the first dimension (gnuplot `pm3d` compatible).
+
+
+As an additional diagnostic tool, fkabf_diagnostics.py can be used to process the COLVAR file and the KERNELINFO file in the current directory:
+```bash
+ python fkabf_diagnostics.py
+```
+
+### Options
+
+| Flag | Argument | Default | Description |
+|------|----------|---------|-------------|
+| `--colvar` | `<file>` | `COLVAR` | Path to the PLUMED COLVAR file. |
+| `--kernelinfo` | `<file>` | `KERNELINFO` | Path to the KERNELINFO file. If absent, kernel diagnostic plots are skipped. |
+| `--prefix` | `<label>` | *(auto)* | PLUMED action label prefix (e.g., `fk`). Auto-detected from `_fict` column names if not set. |
+| `--dt` | `<float>` | `0.001` | MD timestep in time units. Used to convert the `time` column to step numbers. |
+| `--thinning` | `<int>` | `10` | Thinning factor for scatter and trajectory plots. Every Nth point is plotted. |
+| `--periodic` | `<spec>` | *(none)* | Periodic CV specification for minimum-image z−λ differences. Format: `"cv1:min:max,cv2:min:max"` or `"cv1:period"`. Supports `pi` in expressions. |
+| `--outdir` | `<dir>` | `.` | Output directory for figures. Created if it does not exist. |
+
+### Examples
+
+```bash
+# Minimal: auto-detect everything in current directory
+python fkabf_diagnostics.py
+
+# Specify files and output location
+python fkabf_diagnostics.py --colvar COLVAR --kernelinfo KERNELINFO --outdir plots/
+
+# Alanine dipeptide with periodic CVs
+python fkabf_diagnostics.py --periodic "phi:-pi:pi,psi:-pi:pi" --dt 0.002
+
+# Dense trajectory, less thinning
+python fkabf_diagnostics.py --thinning 2
+```
+
+### Output Figures
+
+| File | Contents |
+|------|----------|
+| `fig_trajectory.pdf` | Per-CV row with three columns: (a) z and λ time series, (b) z−λ difference over time, (c) histogram of z−λ. For periodic CVs (`--periodic`), the minimum-image difference is used. |
+| `fig_bias.pdf` | (a) Bias force magnitude \|F_bias\| over time, (b) exploration potential V_ex over time. |
+| `fig_kernels.pdf` | From KERNELINFO: (a) kernel counts M and M_z, (b) n_eff and compression ratio N/M, (c) Silverman σ per CV, (d) Z₀ and Z(λ) if present. |
+| `fig_exploration.pdf` | Side-by-side 2D scatter: (a) real CV trajectory, (b) λ trajectory, both colored by simulation time. Only produced for 2+ CVs. |
+| `fig_phase.pdf` | z vs λ scatter per CV, colored by time. Points should cluster along the identity line; spread indicates coupling width √(kT/κ). |
+| `fig_nlist.pdf` | Neighbor list size over time, with nlker/M fraction on a twin axis. |
+
+A text summary of the run (CV ranges, z−λ standard deviation, final kernel counts, compression ratio, convergence metrics) is printed to stdout before figure generation.
 
 
 
