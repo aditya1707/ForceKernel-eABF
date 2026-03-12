@@ -1,4 +1,4 @@
-# MB-ForceKernel
+# Force Kernel ABF
 
 A toolkit for running Force Kernel ABF (FKERNELABF) enhanced sampling simulations in PLUMED and recovering free energy landscapes from the results.
 
@@ -54,7 +54,7 @@ PRINT FILE=COLVAR STRIDE=500 ARG=*
 
 Alternatively, it is possible for FKABF to set its own options, where an adaptive sigma is determined based on 10xPACE (or set with 'ADAPTIVE_SIGMA_STRIDE'), and the default data aquisition (PACE) and force-field update frequency (GRIDPACE) are often sufficient for learning the gradient in classical simulations.
 
-### Compulsory Keywords
+#### Compulsory Keywords
 
 | Keyword | Default | Description |
 |---------|---------|-------------|
@@ -72,7 +72,7 @@ Alternatively, it is possible for FKABF to set its own options, where an adaptiv
 | `GRIDSIZE` | `72` | Grid points per dimension for the frozen mean-force grid. |
 | `GRIDPACE` | `500` | Rebuild the mean-force grid from λ-kernels every GRIDPACE steps. Between rebuilds, bias forces are interpolated from the frozen grid. |
 
-### Optional Keywords — Bandwidth
+#### Optional Keywords — Bandwidth
 
 | Keyword | Default | Description |
 |---------|---------|-------------|
@@ -81,21 +81,21 @@ Alternatively, it is possible for FKABF to set its own options, where an adaptiv
 | `ADAPTIVE_SIGMA_STRIDE` | `10 × PACE` | Number of unbiased warmup steps for automatic σ₀ determination (Welford online variance). Only used when `SIGMA` is omitted. During warmup: zero bias, no kernel deposition, λ tracks z. |
 | `FIXED_SIGMA` | `false` | Flag. If set, disables Silverman bandwidth rescaling — all kernels use σ₀ permanently. |
 
-### Optional Keywords — Grid Bounds
+#### Optional Keywords — Grid Bounds
 
 | Keyword | Default | Description |
 |---------|---------|-------------|
 | `GRIDMIN` | *(from CV)* | Lower grid bound(s) for non-periodic CVs. For periodic CVs, bounds are taken from the CV period. One per CV. |
 | `GRIDMAX` | *(from CV)* | Upper grid bound(s) for non-periodic CVs. One per CV. |
 
-### Optional Keywords — Neighbor List
+#### Optional Keywords — Neighbor List
 
 | Keyword | Default | Description |
 |---------|---------|-------------|
 | `NONLIST` | `false` | Flag. Disables the neighbor list (brute-force kernel search). |
 | `NLIST_PARAMETERS` | `3.0 0.5` | Two values: cutoff_factor and skin_factor. The neighbor list includes kernels within cutoff_factor × NSIGMACUT × σ, and rebuilds when the query point drifts by skin_factor × dev². |
 
-### Optional Keywords — Output Files
+#### Optional Keywords — Output Files
 
 All filenames are derived from the PLUMED action label (e.g., `fk: FKERNELABF ...` → files prefixed with `fk.`).
 
@@ -133,7 +133,7 @@ The executable can now be used to process the czar_kernel files:
 ```
 czar_integrate only requires one argument: the directory for depositing the PMFs. Else, czar_integrate can read files in a specified directory (-d) and for all files matching `*czar_kernels_XXXXXXXX.dat`, integrates, and writes `FEL_XXXXXXXX.dat` to the output directory.
 
-### Options
+#### Options
 
 | Flag | Argument | Default | Description |
 |------|----------|---------|-------------|
@@ -149,7 +149,7 @@ czar_integrate only requires one argument: the directory for depositing the PMFs
 | `-o` | `<file>` | `FEL_czar.dat` | Output filename (single-file mode only). |
 | `-v` | — | off | Verbose: print per-step RMSD, hill scaling, and convergence diagnostics. |
 
-### Examples
+#### Examples
 
 ```bash
 # Batch: scan current directory, write FEL snapshots
@@ -168,7 +168,7 @@ czar_integrate only requires one argument: the directory for depositing the PMFs
 ./czar_integrate FEL_snapshots -g 150 -v
 ```
 
-### Output Format
+#### Output Format
 
 **Single-file mode** (`-i`): a space-separated file with columns:
 
@@ -187,7 +187,7 @@ As an additional diagnostic tool, fkabf_diagnostics.py can be used to process th
  python fkabf_diagnostics.py
 ```
 
-### Options
+#### Options
 
 | Flag | Argument | Default | Description |
 |------|----------|---------|-------------|
@@ -199,7 +199,7 @@ As an additional diagnostic tool, fkabf_diagnostics.py can be used to process th
 | `--periodic` | `<spec>` | *(none)* | Periodic CV specification for minimum-image z−λ differences. Format: `"cv1:min:max,cv2:min:max"` or `"cv1:period"`. Supports `pi` in expressions. |
 | `--outdir` | `<dir>` | `.` | Output directory for figures. Created if it does not exist. |
 
-### Examples
+#### Examples
 
 ```bash
 # Minimal: auto-detect everything in current directory
@@ -215,7 +215,7 @@ python fkabf_diagnostics.py --periodic "phi:-pi:pi,psi:-pi:pi" --dt 0.002
 python fkabf_diagnostics.py --thinning 2
 ```
 
-### Output Figures
+#### Output Figures
 
 | File | Contents |
 |------|----------|
