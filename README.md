@@ -107,6 +107,11 @@ All filenames are derived from the PLUMED action label (e.g., `fk: FKERNELABF ..
 | `STATESTRIDE` | `CZARSTRIDE` or `10 × GRIDPACE` | Write restart state file every N steps → `{label}.state.dat`. Overwritten in place. Read automatically on `RESTART`. |
 | `KERNELINFOSTRIDE` | `PACE` | Append one line of kernel diagnostics every N steps → `KERNELINFO`. Columns: step, M, zM, neff, σ per CV, nlker. |
 
+<br>
+
+---
+
+<br>
 
 ### 2. Running the simulation
 
@@ -181,6 +186,7 @@ czar_integrate only requires one argument: the directory for depositing the PMFs
 
 Points below the population threshold are written as `nan`. For 2D+ grids, blank lines separate slices along the first dimension (gnuplot `pm3d` compatible).
 
+### 4. Recover the free energy landscape
 
 As an additional diagnostic tool, fkabf_diagnostics.py can be used to process the COLVAR file and the KERNELINFO file in the current directory:
 ```bash
