@@ -1978,6 +1978,11 @@ public:
     // V_ex and Neff are evaluated here (not before BAOAB) so that the
     // reported scalars are synchronized with the reported lambda position.
     double V_ex = 0.0;
+    if (biasFactor_ > 1.0) {
+      double Z_final = interpolateScalar(s_fict_, Zgrid_);
+      double c_ex = kT_ * (biasFactor_ - 1.0);
+      V_ex = c_ex * std::log(1.0 + Z_final / (Z0_density_ + 1e-300));
+    }
 
     setBias(V_ex);
     getPntrToComponent("wamp")->set(V_ex);
