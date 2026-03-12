@@ -64,8 +64,8 @@ Alternatively, it is possible for FKABF to set its own options, where an adaptiv
 | `FRICTION` | `10.0` | Langevin friction coefficient for the BAOAB thermostat on λ (1/time_unit). |
 | `TEMP` | `300.0` | Temperature (K). Sets kT = k_B × TEMP. |
 | `PACE` | `5` | Deposit a force sample into both kernel populations every PACE MD steps. |
-| `THRESH` | `1.0` | Kernel merge threshold in σ-normalised distance. Kernels closer than THRESH × σ_global are merged via parallel variance. 1.0 is the OPES standard; lower → more compression, higher → more kernels. |
-| `NSIGMACUT` | `4.0` | Kernel cutoff in σ per dimension. Kernels farther than NSIGMACUT × σ are ignored in NW regression. 4.0 gives < 2% contribution at the boundary. |
+| `THRESH` | `1.0` | Kernel merge threshold in σ-normalised distance. Kernels closer than THRESH × σ_global are merged via parallel variance. 1.0 is the OPES standard; lower → more compression, higher → more kernels. Do not change unless you know what you are doing. |
+| `NSIGMACUT` | `4.0` | Kernel cutoff in σ per dimension. Kernels farther than NSIGMACUT × σ are ignored in NW regression. 4.0 gives < 2% contribution at the boundary. Do not change unless you know what you are doing. |
 | `BIASFACTOR` | `1.0` | Exploration factor γ. `1.0` = pure ABF (no exploration). `> 1.0` = density-based exploration: V_ex = c·ln(1 + Z/Z₀) where c = kT(γ−1). Pushes λ away from well-sampled basins. The CZAR estimator on z is unaffected. |
 | `MUXCLAMP` | `500.0` | Per-kernel mean-force clamp (kJ/mol/unit). Individual kernel μ values are hard-clamped to ±MUXCLAMP on absorption. Safety net for sparse regions. |
 | `MAXFORCE` | `500.0` | Grid mean-force clamp (kJ/mol/unit). The NW mean force on the grid is clamped per-node before interpolation. Safety net for unphysical force estimates. |
@@ -85,8 +85,8 @@ Alternatively, it is possible for FKABF to set its own options, where an adaptiv
 
 | Keyword | Default | Description |
 |---------|---------|-------------|
-| `GRIDMIN` | *(from CV)* | Lower grid bound(s) for non-periodic CVs. For periodic CVs, bounds are taken from the CV period. One per CV. |
-| `GRIDMAX` | *(from CV)* | Upper grid bound(s) for non-periodic CVs. One per CV. |
+| `GRIDMIN` | *(from CV)* | Lower grid bound(s) for non-periodic CVs. For periodic CVs, bounds are taken from the CV period. One per CV. Reflecting walls automatically applied. |
+| `GRIDMAX` | *(from CV)* | Upper grid bound(s) for non-periodic CVs. One per CV. Reflecting walls automatically applied. |
 
 #### Optional Keywords — Neighbor List
 
