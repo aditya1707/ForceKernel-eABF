@@ -159,6 +159,7 @@ czar_integrate only requires one argument: the directory for depositing the PMFs
 | `-i` | `<file>` | — | Process a single kernel file instead of scanning. |
 | `-o` | `<file>` | `FEL_czar.dat` | Output filename (single-file mode only). |
 | `-v` | — | off | Verbose: print per-step RMSD, hill scaling, and convergence diagnostics. |
+| `-S` | — | off | Skip kernel files before some step number |
 
 #### Examples
 
@@ -168,6 +169,9 @@ czar_integrate only requires one argument: the directory for depositing the PMFs
 
 # Batch with fixed MC steps and user-specified height
 ./czar_integrate FEL_snapshots -n 5000000 -h 0.2
+
+# Batch with fixed MC steps, user-specified height, skip analyzing before step 5M
+./czar_integrate FEL_snapshots -n 5000000 -h 0.2 -S 5000000
 
 # Batch: scan a different directory
 ./czar_integrate FEL_snapshots -d /path/to/run
