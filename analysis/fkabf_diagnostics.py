@@ -304,28 +304,26 @@ def plot_bias(colvar, steps, prefix, thinning, output='fig_bias.pdf'):
 # ═══════════════════════════════════════════════════════════════════════════
 
 def plot_kernels(kinfo, cv_names, output='fig_kernels.pdf'):
+    """Plot kernel compression diagnostics from {label}.kernelinfo.dat.
+
+    Columns written by FKERNELABF::writeKernelInfo():
+        step  M  zM  neff  {cv}_sigma...  nlker
+
+    Note: totalN (raw sample count) is NOT in kernelinfo.dat — it is only
+    available in lambda-kernel dump files ({label}.kernels_*.dat).  To see
+    the compression ratio N/M, load a kernel dump with kernel_diagnostics.py.
+    """
     step_M = kinfo['step'] / 1e6
 
-    # Detect sigma columns
-    sigma_cols = [k for k in kinfo if '_sigma' in k]
-    has_Z0 = 'Z0' in kinfo
-    has_Zlocal = 'Zlocal' in kinfo
-    has_totalN = 'totalN' in kinfo
+    # Detect sigma columns written as "{cv_name}_sigma"
+    sigma_cols = [k for k in kinfo if k.endswith('_sigma')]
 
-    nrows = 3 + (1 if has_Z0 or has_Zlocal else 0)
-    fig, axes = plt.subplots(nrows, 1, figsize=(14, 3.8 * nrows), sharex=True)
+    fig, axes = plt.subplots(3, 1, figsize=(14, 3.8 * 3), sharex=True)
 
-    # (a) M and zM
+    # (a) M and zM kernel counts
     ax = axes[0]
-    ax.plot(step_M, kinfo['M'], lw=1.5, color=C_BLUE, label=r'$M$ ($\lambda$-kernels)')
-    ax.plot(step_M, kinfo['zM'], lw=1.5, color=C_RED, label=r'$M_z$ ($z$-kernels)')
-    if has_totalN:
-        ax2 = ax.twinx()
-        ax2.plot(step_M, kinfo['totalN'], lw=1.0, ls='--', color=C_GREY, alpha=0.6,
-                 label=r'$N_{\mathrm{total}}$')
-        ax2.set_ylabel(r'$N_{\mathrm{total}}$', fontsize=14, color=C_GREY)
-        ax2.tick_params(axis='y', labelcolor=C_GREY, labelsize=12,
-                        direction='in', length=4)
+    ax.plot(step_M, kinfo['M'],  lw=1.5, color=C_BLUE, label=r'$M$ ($\lambda$-kernels)')
+    ax.plot(step_M, kinfo['zM'], lw=1.5, color=C_RED,  label=r'$M_z$ ($z$-kernels)')
     style_ax(ax, ylabel='Kernel count')
     ax.legend(fontsize=11, frameon=True, fancybox=False,
               edgecolor='#cccccc', loc='upper left')
@@ -334,17 +332,10 @@ def plot_kernels(kinfo, cv_names, output='fig_kernels.pdf'):
     ax.grid(True, alpha=0.2, which='major')
     panel_label(ax, 'a', x=-0.06, y=1.06)
 
-    # (b) neff and compression ratio
+    # (b) Effective sample count neff = totalN² / Σ(Nk²)
     ax = axes[1]
-    ax.plot(step_M, kinfo['neff'], lw=1.5, color=C_GREEN, label=r'$n_{\mathrm{eff}}$')
-    if has_totalN and 'M' in kinfo:
-        ratio = kinfo['totalN'] / np.maximum(kinfo['M'], 1)
-        ax2 = ax.twinx()
-        ax2.plot(step_M, ratio, lw=1.0, ls='--', color=C_ORANGE, alpha=0.8,
-                 label=r'$N/M$ (samples/kernel)')
-        ax2.set_ylabel(r'$N/M$', fontsize=14, color=C_ORANGE)
-        ax2.tick_params(axis='y', labelcolor=C_ORANGE, labelsize=12,
-                        direction='in', length=4)
+    ax.plot(step_M, kinfo['neff'], lw=1.5, color=C_GREEN,
+            label=r'$n_{\mathrm{eff}} = N^2 / \sum N_k^2$')
     style_ax(ax, ylabel=r'$n_{\mathrm{eff}}$')
     ax.legend(fontsize=11, frameon=True, fancybox=False,
               edgecolor='#cccccc', loc='upper left')
@@ -353,10 +344,9 @@ def plot_kernels(kinfo, cv_names, output='fig_kernels.pdf'):
     ax.grid(True, alpha=0.2, which='major')
     panel_label(ax, 'b', x=-0.06, y=1.06)
 
-    # (c) Silverman bandwidth per CV
+    # (c) Silverman bandwidth per CV dimension
     ax = axes[2]
     for j, scol in enumerate(sigma_cols):
-        # Extract CV name from column name (e.g. "d1.x_sigma" → "d1.x")
         cv_label = scol.replace('_sigma', '')
         ax.plot(step_M, kinfo[scol], lw=1.5,
                 color=CV_COLORS[j % len(CV_COLORS)],
@@ -369,35 +359,6 @@ def plot_kernels(kinfo, cv_names, output='fig_kernels.pdf'):
     ax.yaxis.set_minor_locator(AutoMinorLocator())
     ax.grid(True, alpha=0.2, which='major')
     panel_label(ax, 'c', x=-0.06, y=1.06)
-
-    # (d) Z0 and Zlocal (if available)
-    if has_Z0 or has_Zlocal:
-        ax = axes[3]
-        if has_Z0:
-            ax.plot(step_M, kinfo['Z0'], lw=1.5, color=C_TEAL,
-                    label=r'$Z_0$ (median)')
-        if has_Zlocal:
-            ax.plot(step_M, kinfo['Zlocal'], lw=0.5, alpha=0.5,
-                    color=C_PURPLE, label=r'$Z(\lambda)$', rasterized=True)
-            if has_Z0:
-                # Ratio on twin axis
-                ax2 = ax.twinx()
-                ratio = kinfo['Zlocal'] / np.maximum(kinfo['Z0'], 1e-10)
-                ax2.plot(step_M, ratio, lw=0.4, alpha=0.4, color=C_ORANGE,
-                         rasterized=True, label=r'$Z(\lambda)/Z_0$')
-                ax2.set_ylabel(r'$Z(\lambda)/Z_0$', fontsize=14, color=C_ORANGE)
-                ax2.tick_params(axis='y', labelcolor=C_ORANGE, labelsize=12,
-                                direction='in', length=4)
-                ax2.axhline(1, color=C_ORANGE, lw=0.8, ls=':', alpha=0.5)
-                ax2.legend(fontsize=10, frameon=True, fancybox=False,
-                           edgecolor='#cccccc', loc='upper right')
-        ax.set_yscale('log')
-        style_ax(ax, ylabel=r'$Z$ (kernel support)')
-        ax.legend(fontsize=11, frameon=True, fancybox=False,
-                  edgecolor='#cccccc', loc='upper left')
-        ax.xaxis.set_minor_locator(AutoMinorLocator())
-        ax.grid(True, alpha=0.2, which='major')
-        panel_label(ax, 'd', x=-0.06, y=1.06)
 
     axes[-1].set_xlabel(r'Steps $\times\,10^6$', fontsize=LABEL_SIZE)
     fig.tight_layout()
@@ -579,11 +540,9 @@ def print_summary(colvar, kinfo, cv_names, fict_names, prefix, dt, pdict=None):
         print(f"  Final M:         {kinfo['M'][-1]:.0f}")
         print(f"  Final zM:        {kinfo['zM'][-1]:.0f}")
         print(f"  Final neff:      {kinfo['neff'][-1]:.1f}")
-        if 'totalN' in kinfo:
-            print(f"  Final totalN:    {kinfo['totalN'][-1]:.0f}")
-            print(f"  Compression:     {kinfo['totalN'][-1]/max(kinfo['M'][-1],1):.1f}x "
-                  f"(samples/kernel)")
-        sigma_cols = [k for k in kinfo if '_sigma' in k]
+        # totalN is NOT written to kernelinfo.dat — load a lambda-kernel
+        # dump ({label}.kernels_*.dat) with kernel_diagnostics.py to see N/M.
+        sigma_cols = [k for k in kinfo if k.endswith('_sigma')]
         for sc in sigma_cols:
             print(f"  Final {sc}: {kinfo[sc][-1]:.6f}")
         if 'nlker' in kinfo:
