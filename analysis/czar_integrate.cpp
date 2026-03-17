@@ -614,6 +614,32 @@ MCResult mc_integrate(
     return {actual_steps, total, acceptance, final_rmsd};
 }
 
+// ─────────────────────── 1D trapezoidal integration ──────────────────────
+
+void trapz_integrate_1d(
+    const std::vector<double> &grad,   // [N] CZAR gradient
+    const std::vector<bool> &allowed,
+    int N,
+    double dx,
+    // output:
+    std::vector<double> &A)
+{
+    A.assign(N, 0.0);
+
+    // Cumulative trapezoidal rule
+    for (int i = 1; i < N; i++) {
+        double g_prev = allowed[i-1] ? grad[i-1] : 0.0;
+        double g_curr = allowed[i]   ? grad[i]   : 0.0;
+        A[i] = A[i-1] + 0.5 * (g_prev + g_curr) * dx;
+    }
+
+    // Shift so min over allowed region = 0
+    double amin = 1e30;
+    for (int i = 0; i < N; i++)
+        if (allowed[i] && A[i] < amin) amin = A[i];
+    for (int i = 0; i < N; i++) A[i] -= amin;
+}
+
 // ─────────────────────── output writer ──────────────────────────────────────
 
 void write_output(const char *path,
@@ -718,7 +744,21 @@ void write_simple_fel(const char *path,
 
 // ─────────────────── batch processing ───────────────────────────────────────
 
-// Scan a directory for *czar_kernels_XXXXXXXX.dat files (any label prefix)
+// Extract step number from *_NNNNN...N.dat filename
+static long extract_step_from_path(const std::string &path) {
+    size_t dot = path.rfind(".dat");
+    if (dot == std::string::npos || dot == 0) return -1;
+    // Walk backward from just before ".dat" collecting digits
+    size_t end = dot;
+    size_t start = end;
+    while (start > 0 && isdigit(path[start - 1])) --start;
+    if (start == end) return -1;  // no digits found
+    // Check that the character before the digits is '_'
+    if (start == 0 || path[start - 1] != '_') return -1;
+    return std::atol(path.substr(start, end - start).c_str());
+}
+
+// Scan a directory for *czar_kernels_NNNNN...N.dat files (any label prefix, any digit count)
 static std::vector<std::string> scan_for_czar_files(const std::string &dir) {
     std::vector<std::string> results;
     DIR *dp = opendir(dir.c_str());
@@ -730,56 +770,68 @@ static std::vector<std::string> scan_for_czar_files(const std::string &dir) {
     struct dirent *entry;
     while ((entry = readdir(dp)) != NULL) {
         std::string fname(entry->d_name);
-        // Match: *czar_kernels_XXXXXXXX.dat
+        // Match: *czar_kernels_<digits>.dat
         size_t pos = fname.find("czar_kernels_");
         if (pos == std::string::npos) continue;
         size_t dstart = pos + 13; // after "czar_kernels_"
-        if (fname.size() < dstart + 12) continue; // need 8 digits + ".dat"
+        if (fname.size() < dstart + 5) continue; // need at least 1 digit + ".dat"
         if (fname.substr(fname.size() - 4) != ".dat") continue;
-        std::string digits = fname.substr(dstart, 8);
+        // Everything between "czar_kernels_" and ".dat" must be digits
+        std::string digits = fname.substr(dstart, fname.size() - 4 - dstart);
+        if (digits.empty()) continue;
         bool all_digits = true;
-        for (int i = 0; i < 8; i++)
+        for (size_t i = 0; i < digits.size(); i++)
             if (!isdigit(digits[i])) { all_digits = false; break; }
         if (!all_digits) continue;
-        // Ensure nothing between digits and .dat
-        if (fname.substr(dstart + 8) != ".dat") continue;
         results.push_back(dir + "/" + fname);
     }
     closedir(dp);
-    std::sort(results.begin(), results.end());
-    return results;
-}
 
-// Extract step number from *_XXXXXXXX.dat filename
-static long extract_step_from_path(const std::string &path) {
-    // Find last occurrence of _XXXXXXXX.dat
-    if (path.size() < 13) return -1;
-    size_t dot = path.rfind(".dat");
-    if (dot == std::string::npos || dot < 9) return -1;
-    std::string digits = path.substr(dot - 8, 8);
-    for (int i = 0; i < 8; i++)
-        if (!isdigit(digits[i])) return -1;
-    return std::atol(digits.c_str());
+    // Sort by step number (numeric), not lexicographic.
+    // Lexicographic sort puts "1000000" before "600000" because '1' < '6'.
+    std::sort(results.begin(), results.end(),
+        [](const std::string &a, const std::string &b) {
+            return extract_step_from_path(a) < extract_step_from_path(b);
+        });
+    return results;
 }
 
 void process_batch(const std::string &scan_dir,
                    const std::string &out_dir,
                    int grid_pts, double nsigma, double minpop,
                    unsigned int mc_steps, double mc_hill,
-                   double mc_hill_factor, bool verbose)
+                   double mc_hill_factor, bool verbose,
+                   long start_step)
 {
-    printf("Scanning '%s' for *czar_kernels_XXXXXXXX.dat ...\n", scan_dir.c_str());
+    printf("Scanning '%s' for *czar_kernels_*.dat ...\n", scan_dir.c_str());
     std::vector<std::string> snapshots = scan_for_czar_files(scan_dir);
 
     if (snapshots.empty()) {
         printf("  No czar_kernels snapshot files found.\n");
         return;
     }
-    printf("  Found %d snapshots\n", (int)snapshots.size());
+    printf("  Found %d snapshots (sorted by step number)\n", (int)snapshots.size());
+
+    // Filter by start_step
+    if (start_step > 0) {
+        std::vector<std::string> filtered;
+        for (const auto &f : snapshots) {
+            if (extract_step_from_path(f) >= start_step)
+                filtered.push_back(f);
+        }
+        printf("  After --start %ld filter: %d snapshots\n",
+               start_step, (int)filtered.size());
+        snapshots = std::move(filtered);
+    }
+
+    if (snapshots.empty()) {
+        printf("  No snapshots remaining after filter.\n");
+        return;
+    }
 
     // Create output directory
     mkdir(out_dir.c_str(), 0755);
-    printf("  Output → %s/\n\n", out_dir.c_str());
+    printf("  Output -> %s/\n\n", out_dir.c_str());
 
     int written = 0;
     for (size_t si = 0; si < snapshots.size(); si++) {
@@ -794,8 +846,9 @@ void process_batch(const std::string &scan_dir,
         }
         if (kernels.empty()) continue;
 
-        printf("  [%d/%d] step %08ld  (%d kernels) ... ",
-               (int)(si+1), (int)snapshots.size(), step, (int)kernels.size());
+        printf("  [%d/%d] step %ld  (%d kernels, %dD) ... ",
+               (int)(si+1), (int)snapshots.size(), step,
+               (int)kernels.size(), meta.dim);
         fflush(stdout);
 
         // Evaluate CZAR gradient
@@ -806,17 +859,22 @@ void process_batch(const std::string &scan_dir,
         czar_on_grid(meta, kernels, grid_pts, nsigma,
                      ptilde, czar_grad, sizes, gmin, gmax, dx, allowed, minpop, verbose);
 
-        // MC integrate
+        // Integrate: trapezoidal for 1D, MC for 2D+
         std::vector<double> A;
-        MCResult mc = mc_integrate(czar_grad, allowed, sizes, dx, meta.periodic, meta.kT,
-                     mc_steps, mc_hill, mc_hill_factor, verbose, A);
-
-        // Write FEL
         char outname[512];
         snprintf(outname, sizeof(outname), "%s/FEL_%08ld.dat", out_dir.c_str(), step);
-        write_simple_fel(outname, meta.dim, sizes, gmin, dx, A, allowed);
-        printf("MC %uk %.0f%% RMSD=%.4f -> FEL_%08ld.dat\n",
-               mc.steps / 1000, 100.0 * mc.acceptance, mc.rmsd, step);
+
+        if (meta.dim == 1) {
+            trapz_integrate_1d(czar_grad, allowed, sizes[0], dx[0], A);
+            write_simple_fel(outname, meta.dim, sizes, gmin, dx, A, allowed);
+            printf("trapz -> FEL_%08ld.dat\n", step);
+        } else {
+            MCResult mc = mc_integrate(czar_grad, allowed, sizes, dx, meta.periodic, meta.kT,
+                         mc_steps, mc_hill, mc_hill_factor, verbose, A);
+            write_simple_fel(outname, meta.dim, sizes, gmin, dx, A, allowed);
+            printf("MC %uk %.0f%% RMSD=%.4f -> FEL_%08ld.dat\n",
+                   mc.steps / 1000, 100.0 * mc.acceptance, mc.rmsd, step);
+        }
         written++;
     }
 
@@ -826,8 +884,9 @@ void process_batch(const std::string &scan_dir,
 // ─────────────────────── help ──────────────────────────────────────────────
 
 static void print_help(const char *prog) {
-    printf("czar_integrate — MC integration of CZAR kernel gradient field\n");
-    printf("                  (FK-ABF companion, abf_integrate conventions)\n\n");
+    printf("czar_integrate — integration of CZAR kernel gradient field\n");
+    printf("                  (FK-eABF companion, abf_integrate conventions)\n");
+    printf("                  1D: trapezoidal rule; 2D+: MC integration\n\n");
     printf("Usage:\n");
     printf("  %s <output_dir>             Scan CWD for *czar_kernels_*.dat, write FELs\n", prog);
     printf("  %s <output_dir> [options]   Same, with options\n", prog);
@@ -841,14 +900,16 @@ static void print_help(const char *prog) {
     printf("  -s <nsigma>     Kernel cutoff in sigma units             [4.0]\n");
     printf("  -m <minpop>     Min density fraction for allowed region  [1e-3]\n");
     printf("  -d <dir>        Directory to scan (default: current)     [.]\n");
+    printf("  -S <step>       Start from this step number (skip earlier) [0]\n");
     printf("  -i <file>       Single-file mode (skip auto-scan)\n");
     printf("  -o <file>       Output file for single-file mode         [FEL_czar.dat]\n");
     printf("  -v              Verbose output\n\n");
     printf("Examples:\n");
-    printf("  %s FEL_snapshots                 # scan current dir, write to FEL_snapshots/\n", prog);
-    printf("  %s FEL_snapshots -n 5000000      # set fixed MC steps to run\n", prog);
-    printf("  %s FEL_snapshots -d /path/to/run # scan another directory then write to FEL_snapshots\n", prog);
-    printf("  %s -i fk.czar_kernels_10000000.dat -o PMF.dat  # process single file\n", prog);
+    printf("  %s FEL_snapshots                     # scan ., write to FEL_snapshots/\n", prog);
+    printf("  %s FEL_snapshots -n 5000000          # fixed MC steps\n", prog);
+    printf("  %s FEL_snapshots -d /path/to/run     # scan another directory\n", prog);
+    printf("  %s FEL_snapshots -S 5000000          # skip snapshots before step 5M\n", prog);
+    printf("  %s -i fk.czar_kernels_10000000.dat -o PMF.dat  # single file\n", prog);
     printf("\nCompile: g++ -O2 -o czar_integrate czar_integrate.cpp -lm\n");
 }
 
@@ -868,6 +929,7 @@ int main(int argc, char *argv[]) {
     const char *scan_dir = ".";
     const char *out_dir = NULL;
     bool verbose = false;
+    long start_step = 0;
 
     if (argc < 2) {
         print_help(argv[0]);
@@ -888,6 +950,7 @@ int main(int argc, char *argv[]) {
             case 'i': single_input = argv[++i]; break;
             case 'o': output = argv[++i]; break;
             case 'd': scan_dir = argv[++i]; break;
+            case 'S': start_step = atol(argv[++i]); break;
             case 'v': verbose = true; break;
             default:
                 fprintf(stderr, "Unknown option: %s\n", argv[i]);
@@ -923,11 +986,17 @@ int main(int argc, char *argv[]) {
                      ptilde, czar_grad, sizes, gmin, gmax, dx, allowed, minpop, verbose);
 
         std::vector<double> A;
-        printf("Integrating via MC ...\n");
-        MCResult mc = mc_integrate(czar_grad, allowed, sizes, dx, meta.periodic, meta.kT,
-                     mc_steps, mc_hill, mc_hill_factor, verbose, A);
-        printf("  MC: %u steps, %.1f%% acceptance, RMSD=%.6f\n",
-               mc.steps, 100.0 * mc.acceptance, mc.rmsd);
+        if (meta.dim == 1) {
+            printf("Integrating via trapezoidal rule (1D) ...\n");
+            trapz_integrate_1d(czar_grad, allowed, sizes[0], dx[0], A);
+            printf("  Trapezoidal integration complete.\n");
+        } else {
+            printf("Integrating via MC (%dD) ...\n", meta.dim);
+            MCResult mc = mc_integrate(czar_grad, allowed, sizes, dx, meta.periodic, meta.kT,
+                         mc_steps, mc_hill, mc_hill_factor, verbose, A);
+            printf("  MC: %u steps, %.1f%% acceptance, RMSD=%.6f\n",
+                   mc.steps, 100.0 * mc.acceptance, mc.rmsd);
+        }
 
         printf("Writing FEL to: %s\n", output);
         write_output(output, meta, sizes, gmin, dx, ptilde, czar_grad, A, allowed);
@@ -946,7 +1015,8 @@ int main(int argc, char *argv[]) {
 
     process_batch(std::string(scan_dir), std::string(out_dir),
                   grid_pts, nsigma, minpop,
-                  mc_steps, mc_hill, mc_hill_factor, verbose);
+                  mc_steps, mc_hill, mc_hill_factor, verbose,
+                  start_step);
 
     return 0;
 }
