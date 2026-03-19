@@ -61,6 +61,7 @@ private:
   // The CZAR estimator on z is completely unaffected.
   double biasFactor_;
   double Z0_density_;   // median-Z reference for density-based exploration (denominator)
+  std::vector<double> explorScale_;  // per-CV scaling of exploration force (default 1.0)
   double muxClamp_;   // per-kernel force clamp (default 500)
   double maxForce_;   // grid bias force clamp  (default 500)
   std::vector<double> sigma0_;
@@ -1552,6 +1553,12 @@ public:
              "on the grid at GRIDPACE intervals, synchronized with the "
              "ABF mean force.  Pushes λ away from well-sampled basins. "
              "The CZAR estimator on z is unaffected.");
+    keys.add("optional", "EXPLORSCALE",
+             "Per-CV scaling of the exploration force (default 1.0 for all CVs). "
+             "One value or one per CV. Values in [0,1]: 1.0 = full exploration, "
+             "0.0 = no exploration along that CV. The ABF cancellation force is "
+             "unaffected by this scaling. Useful when one CV should be driven "
+             "by exploration while another evolves naturally on the flattened surface.");
 
     // Force clamps (safety nets — defaults are generous for most systems)
     keys.add("compulsory", "MUXCLAMP", "500.0",
@@ -1740,6 +1747,15 @@ public:
     parse("BIASFACTOR", biasFactor_);
     if (biasFactor_ < 1.0) error("BIASFACTOR must be >= 1.0 (1.0 = pure ABF).");
 
+    parseVector("EXPLORSCALE", explorScale_);
+    if (explorScale_.empty()) explorScale_.assign(dim_, 1.0);
+    else if (explorScale_.size() == 1) explorScale_.assign(dim_, explorScale_[0]);
+    else if (explorScale_.size() != dim_) error("EXPLORSCALE: one value or one per CV");
+    for (unsigned i = 0; i < dim_; ++i) {
+      if (explorScale_[i] < 0.0 || explorScale_[i] > 1.0)
+        error("EXPLORSCALE must be in [0, 1] for all CVs.");
+    }
+
     parse("MUXCLAMP", muxClamp_);
     parse("MAXFORCE", maxForce_);
     if (muxClamp_ <= 0.0) error("MUXCLAMP must be > 0.");
@@ -1887,6 +1903,14 @@ public:
                  "V_ex=c·ln(1+Z/Z₀)  c=kT·(γ−1)=%.4f kJ/mol\n",
                  biasFactor_, kT_ * (biasFactor_ - 1.0));
       log.printf("  [FKERNELABF] Z₀ = median(Z) on mean-force grid, updated each grid rebuild\n");
+      // Log EXPLORSCALE if any dimension is not 1.0
+      bool hasScale = false;
+      for (unsigned i = 0; i < dim_; ++i) if (explorScale_[i] < 1.0) hasScale = true;
+      if (hasScale) {
+        log.printf("  [FKERNELABF] EXPLORSCALE=(");
+        for (unsigned i = 0; i < dim_; ++i) log.printf("%s%.2f", i?",":"", explorScale_[i]);
+        log.printf(")  exploration force scaled per CV\n");
+      }
     } else
       log.printf("  [FKERNELABF] BIASFACTOR=1.0  pure ABF, no exploration\n");
     for (unsigned i = 0; i < dim_; ++i)
@@ -1957,7 +1981,10 @@ public:
     for (unsigned i = 0; i < dim_; ++i) work_cv_[i] = getArgument(i);
 
     if (firstStep_) {
-      for (unsigned i = 0; i < dim_; ++i) { s_fict_[i] = work_cv_[i]; v_fict_[i] = 0.0; }
+      for (unsigned i = 0; i < dim_; ++i) {
+        s_fict_[i] = work_cv_[i];
+        v_fict_[i] = std::sqrt(kT_ / mass_[i]) * gauss_(rng_);
+      }
       if (adaptiveSigma_) {
         av_cv_.assign(dim_, 0.0);
         av_M2_.assign(dim_, 0.0);
@@ -2041,7 +2068,7 @@ public:
     double F_explore[3] = {0, 0, 0};
     if (biasFactor_ > 1.0) {
       interpolateVectorGrid(s_fict_, explorationForceGrid_, work_fe_);
-      for (unsigned i = 0; i < dim_; ++i) F_explore[i] = work_fe_[i];
+      for (unsigned i = 0; i < dim_; ++i) F_explore[i] = explorScale_[i] * work_fe_[i];
     }
 
     // (F) BAOAB Langevin dynamics for s_fict_.
@@ -2103,7 +2130,7 @@ public:
       double fe2[3] = {0, 0, 0};
       if (biasFactor_ > 1.0) {
         interpolateVectorGrid(s_fict_, explorationForceGrid_, work_fev_);
-        for (unsigned i = 0; i < dim_; ++i) fe2[i] = work_fev_[i];
+        for (unsigned i = 0; i < dim_; ++i) fe2[i] = explorScale_[i] * work_fev_[i];
       }
       for (unsigned i = 0; i < dim_; ++i) {
         double d2 = periodicDelta(i, s_fict_[i], work_cv_[i]);

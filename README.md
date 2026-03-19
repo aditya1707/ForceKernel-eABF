@@ -61,12 +61,13 @@ Alternatively, it is possible for FKABF to set its own options, where an adaptiv
 | `ARG` | — | Collective variables (standard PLUMED). One to three CVs supported. |
 | `KAPPA` | — | Spring constant(s) for the extended Lagrangian coupling (kJ/mol/unit²). One value or one per CV. Larger κ → tighter z–λ coupling, smaller fluctuations σ = √(kT/κ). |
 | `TAU` | `0.5` | Oscillation period(s) of the extended variable (time units). Determines the fictitious mass as m = κτ²/(4π²). One value or one per CV. |
-| `FRICTION` | `10.0` | Langevin friction coefficient for the BAOAB thermostat on λ (1/time_unit). |
+| `FRICTION` | `10.0` | Langevin friction coefficient for the BAOAB thermostat on λ (1/time_unit). Setting one option sets the FRICTION for all CVs, alternatively, it accepts one value per CV. |
 | `TEMP` | `300.0` | Temperature (K). Sets kT = k_B × TEMP. |
 | `PACE` | `5` | Deposit a force sample into both kernel populations every PACE MD steps. |
 | `THRESH` | `1.0` | Kernel merge threshold in σ-normalised distance. Kernels closer than THRESH × σ_global are merged via parallel variance. 1.0 is the OPES standard; lower → more compression, higher → more kernels. Do not change unless you know what you are doing. |
 | `NSIGMACUT` | `4.0` | Kernel cutoff in σ per dimension. Kernels farther than NSIGMACUT × σ are ignored in NW regression. 4.0 gives < 2% contribution at the boundary. Do not change unless you know what you are doing. |
 | `BIASFACTOR` | `1.0` | Exploration factor γ. `1.0` = pure ABF (no exploration). `> 1.0` = density-based exploration: V_ex = c·ln(1 + Z/Z₀) where c = kT(γ−1). Pushes λ away from well-sampled basins. The CZAR estimator on z is unaffected. |
+| `EXPLORSCALE` | `1.0` | Exploration scaling factor. `1.0` = full exploration biasing force. `< 1.0` = reduced application of force on the CV from the density-based bias, setting it = 0 disables the density-based boost. This is an option to reduce the additional force on CVs that are more auxillary, and do not drive the transition, for example setting it = 1.0, 0.0 for a two CV system disables the boost on the second CV. |
 | `MUXCLAMP` | `500.0` | Per-kernel mean-force clamp (kJ/mol/unit). Individual kernel μ values are hard-clamped to ±MUXCLAMP on absorption. Safety net for sparse regions. |
 | `MAXFORCE` | `500.0` | Grid mean-force clamp (kJ/mol/unit). The NW mean force on the grid is clamped per-node before interpolation. Safety net for unphysical force estimates. |
 | `GRIDSIZE` | `72` | Grid points per dimension for the frozen mean-force grid. |
