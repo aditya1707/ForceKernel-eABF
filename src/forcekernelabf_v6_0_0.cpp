@@ -32,7 +32,7 @@ private:
   // --- internal extended Lagrangian ---
   std::vector<double> kappa_;
   std::vector<double> mass_;
-  double friction_;
+  std::vector<double> friction_;
   double kT_;
   std::vector<double> s_fict_;
   std::vector<double> v_fict_;
@@ -192,8 +192,8 @@ private:
   // --- precomputed BAOAB thermostat constants ---
   // Note it is unsafe to change timesteps mid-simulation because of this precompute
   // Which should not be done anyway
-  double baoab_c1_;              // exp(-friction * dt)
-  std::vector<double> baoab_c2_; // sqrt(kT/mass[i] * (1 - c1^2))
+  std::vector<double> baoab_c1_;  // exp(-friction[i] * dt) per dimension
+  std::vector<double> baoab_c2_; // sqrt(kT/mass[i] * (1 - c1[i]^2))
   bool baoabReady_;
 
   // --- per-step work arrays (avoid heap allocation in hot path) ---
@@ -1520,7 +1520,7 @@ public:
     // Extended Lagrangian
     keys.add("compulsory", "KAPPA",   "Spring constant(s) for extended Lagrangian.");
     keys.add("compulsory", "TAU",     "0.5", "Oscillation period(s) (determines mass).");
-    keys.add("compulsory", "FRICTION","10.0","Langevin friction (1/time_unit).");
+    keys.add("compulsory", "FRICTION","10.0","Langevin friction (1/time_unit). One value or one per CV.");
     keys.add("compulsory", "TEMP",    "300.0","Temperature (K).");
 
     // Kernel parameters
@@ -1610,7 +1610,7 @@ public:
   explicit ForceKernelABF(const ActionOptions& ao)
     : PLUMED_BIAS_INIT(ao),
       dim_(0),
-      friction_(10.0), kT_(0.0),
+      kT_(0.0),
       firstStep_(true),
       adaptiveSigma_(false), adaptiveSigmaStride_(0), adaptiveCounter_(0),
       rng_(std::random_device{}()), gauss_(0.0, 1.0),
@@ -1635,7 +1635,7 @@ public:
       kernelInfoStride_(0),
       kernelInfoFileOpen_(false),
       sigDirty_(true), zSigDirty_(true),
-      baoab_c1_(0.0), baoabReady_(false) {
+      baoabReady_(false) {
 
     dim_ = getNumberOfArguments();
     if (dim_ < 1 || dim_ > 3)
@@ -1668,10 +1668,13 @@ public:
 
     double temp = 300.0;
     parse("TEMP", temp);
-    parse("FRICTION", friction_);
+    parseVector("FRICTION", friction_);
+    if (friction_.size() == 1) friction_.assign(dim_, friction_[0]);
+    else if (friction_.size() != dim_) error("FRICTION: one value or one per CV");
 
     if (temp <= 0.0) error("TEMP must be > 0.");
-    if (friction_ < 0.0) error("FRICTION must be >= 0.");
+    for (unsigned i = 0; i < dim_; ++i)
+      if (friction_[i] < 0.0) error("FRICTION must be >= 0 for all CVs.");
     mass_.resize(dim_);
     for (unsigned i = 0; i < dim_; ++i)
       mass_[i] = kappa_[i] * sq(tau[i]) / (4.0*sq(M_PI));
@@ -1859,7 +1862,9 @@ public:
     for (unsigned i = 0; i < dim_; ++i) log.printf("%s%.1f", i?",":"", kappa_[i]);
     log.printf("  mass=");
     for (unsigned i = 0; i < dim_; ++i) log.printf("%s%.6f", i?",":"", mass_[i]);
-    log.printf("\n  [FKERNELABF] friction=%.2f  kT=%.4f  temp=%.1f\n", friction_, kT_, temp);
+    log.printf("\n  [FKERNELABF] friction=");
+    for (unsigned i = 0; i < dim_; ++i) log.printf("%s%.2f", i?",":"", friction_[i]);
+    log.printf("  kT=%.4f  temp=%.1f\n", kT_, temp);
     if (adaptiveSigma_) {
       log.printf("  [FKERNELABF] SIGMA=AUTO (measuring CV variance over %u unbiased steps)\n",
                  adaptiveSigmaStride_);
@@ -2041,10 +2046,12 @@ public:
 
     // (F) BAOAB Langevin dynamics for s_fict_.
     if (!baoabReady_) {
-      baoab_c1_ = std::exp(-friction_ * dt);
+      baoab_c1_.resize(dim_);
       baoab_c2_.resize(dim_);
-      for (unsigned i = 0; i < dim_; ++i)
-        baoab_c2_[i] = std::sqrt(kT_ / mass_[i] * (1.0 - baoab_c1_*baoab_c1_));
+      for (unsigned i = 0; i < dim_; ++i) {
+        baoab_c1_[i] = std::exp(-friction_[i] * dt);
+        baoab_c2_[i] = std::sqrt(kT_ / mass_[i] * (1.0 - baoab_c1_[i]*baoab_c1_[i]));
+      }
       baoabReady_ = true;
     }
     const double halfdt = 0.5 * dt;
@@ -2064,7 +2071,7 @@ public:
 
     // ── O: Ornstein-Uhlenbeck thermostat (full dt) ─────────────────────────
     for (unsigned i = 0; i < dim_; ++i)
-      v_fict_[i] = baoab_c1_ * v_fict_[i] + baoab_c2_[i] * gauss_(rng_);
+      v_fict_[i] = baoab_c1_[i] * v_fict_[i] + baoab_c2_[i] * gauss_(rng_);
 
     // ── A: half drift ──────────────────────────────────────────────────────
     for (unsigned i = 0; i < dim_; ++i) {
