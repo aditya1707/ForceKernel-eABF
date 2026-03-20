@@ -67,11 +67,11 @@ Alternatively, it is possible for FKABF to set its own options, where an adaptiv
 | `THRESH` | `1.0` | Kernel merge threshold in σ-normalised distance. Kernels closer than THRESH × σ_global are merged via parallel variance. 1.0 is the OPES standard; lower → more compression, higher → more kernels. Do not change unless you know what you are doing. |
 | `NSIGMACUT` | `4.0` | Kernel cutoff in σ per dimension. Kernels farther than NSIGMACUT × σ are ignored in NW regression. 4.0 gives < 2% contribution at the boundary. Do not change unless you know what you are doing. |
 | `BIASFACTOR` | `1.0` | Exploration factor γ. `1.0` = pure ABF (no exploration). `> 1.0` = density-based exploration: V_ex = c·ln(1 + Z/Z₀) where c = kT(γ−1). Pushes λ away from well-sampled basins. The CZAR estimator on z is unaffected. |
-| `EXPLORSCALE` | `1.0` | Exploration scaling factor. `1.0` = full exploration biasing force. `< 1.0` = reduced application of force on the CV from the density-based bias, setting it = 0 disables the density-based boost. This is an option to reduce the additional force on CVs that are more auxillary, and do not drive the transition, for example setting it = 1.0, 0.0 for a two CV system disables the boost on the second CV. |
+| `EXPLORSCALE` | `1.0` | Exploration scaling factor if `BIASFACTOR > 1`. `1.0` = full exploration biasing force. `< 1.0` = reduced application of force on the CV from the density-based bias, setting it `= 0` disables the density-based boost. This is an option to reduce the additional force on CVs that are more auxillary, and do not drive the transition, for example setting `= 1.0, 0.0` for a two CV system disables the boost on the second CV. |
 | `MUXCLAMP` | `500.0` | Per-kernel mean-force clamp (kJ/mol/unit). Individual kernel μ values are hard-clamped to ±MUXCLAMP on absorption. Safety net for sparse regions. |
 | `MAXFORCE` | `500.0` | Grid mean-force clamp (kJ/mol/unit). The NW mean force on the grid is clamped per-node before interpolation. Safety net for unphysical force estimates. |
 | `GRIDSIZE` | `72` | Grid points per dimension for the frozen mean-force grid. |
-| `GRIDPACE` | `500` | Rebuild the mean-force grid from λ-kernels every GRIDPACE steps. Between rebuilds, bias forces are interpolated from the frozen grid. |
+| `GRIDPACE` | `500` | Rebuild the mean-force grid from λ-kernels every GRIDPACE steps. Between rebuilds, bias forces are interpolated from the frozen grid. This is a safe choice for classical simulations but should be reduced for AIMD. |
 
 #### Optional Keywords — Bandwidth
 
