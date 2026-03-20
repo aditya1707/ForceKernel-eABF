@@ -104,7 +104,7 @@ private:
   std::unordered_map<uint64_t, unsigned> idMap_;   // lambda kernel id → index
   std::unordered_map<uint64_t, unsigned> zIdMap_;  // z-kernel id → index
 
-  // --- incremental grid update tracking (lambda-kernels onlyi, no z-kernel grid maintained)
+  // --- incremental grid update tracking (lambda-kernels only, no z-kernel grid maintained)
   // Dirty tracking is first-touch: records the delta between the last published
   // grid and the final kernel state at publish time.
   struct DirtyEntry {
@@ -136,7 +136,6 @@ private:
   // --- grid ---
   std::vector<unsigned> gridN_;
   unsigned gridPace_, gridTotal_;
-  unsigned gridSize_;
   std::vector<double> gridMin_, gridMax_, gridDx_;
   std::vector<double> meanForceGrid_;   // NW mean force grid [gridTotal_ * dim_], for direct ABF force
   std::vector<double> nwDenominator_;  // NW denominator on grid [gridTotal_], for exploration + Neff
@@ -502,7 +501,7 @@ private:
   }
 
 
-  // ================ lambda-kernel compression (the kernels that drives the bias) ================
+  // ================ lambda-kernel compression (the kernels that drive the bias) ================
   void addSample(const std::vector<double>& s_in, const std::vector<double>& f_in) {
     for (unsigned i = 0; i < dim_; ++i) {
       work_s_[i] = wrapToDomain(i, s_in[i]);
@@ -1063,7 +1062,7 @@ private:
     std::fprintf(f, "#! FIELDS");
     for (unsigned d = 0; d < dim_; ++d) std::fprintf(f, " s%u", d);
     for (unsigned d = 0; d < dim_; ++d) std::fprintf(f, " ghat%u", d);
-    std::fprintf(f, " Neff\n");
+    std::fprintf(f, " Z_nw\n");
 
     std::vector<unsigned> idx(dim_);
     std::vector<double> s(dim_), ghat(dim_);
@@ -1086,15 +1085,15 @@ private:
         Z += wNk;
         for (unsigned i = 0; i < dim_; ++i) ghat[i] += wNk*kernels_[kk].mu[i];
       }
-      double Neff = 0.0;
+      double Z_nw = 0.0;
       if (Z > 0) {
         for (unsigned i = 0; i < dim_; ++i) ghat[i] /= Z;
-        Neff = Z;
+        Z_nw = Z;
       }
 
       for (unsigned d = 0; d < dim_; ++d) std::fprintf(f, " %14.6f", s[d]);
       for (unsigned d = 0; d < dim_; ++d) std::fprintf(f, " %14.6f", ghat[d]);
-      std::fprintf(f, " %14.6f\n", Neff);
+      std::fprintf(f, " %14.6f\n", Z_nw);
     }
     std::fclose(f);
     log.printf("  [FKERNELABF] Lambda-grid written: %s  (M=%u, step %lld)\n",
@@ -1192,7 +1191,7 @@ private:
     std::FILE* f = std::fopen(path.c_str(), "w");
     if (!f) return;
 
-    std::fprintf(f, "# CZAR z-kernel file -- ForceKernelABF v6.0.0\n");
+    std::fprintf(f, "# CZAR z-kernel file -- ForceKernelABF v7.0.1\n");
     std::fprintf(f, "# Generated at step %lld\n", (long long)getStep());
     std::fprintf(f, "#\n");
     std::fprintf(f, "# KEY METADATA\n");
@@ -1255,7 +1254,7 @@ private:
     }
     f << std::setprecision(15);
 
-    f << "# FKERNELABF state file v6.0.0\n";
+    f << "# FKERNELABF state file v7.0.1\n";
     f << "# Written at step " << getStep() << "\n";
     f << "#\n";
 
@@ -1634,7 +1633,7 @@ public:
       nlist_(true), nlistCutFactor_(3.0), nlistSkinFactor_(0.5),
       nlistUpdate_(true),
       znlistUpdate_(true),
-      gridPace_(500), gridTotal_(0), gridSize_(72),
+      gridPace_(500), gridTotal_(0),
       lambdaGridStride_(0),
       kernelStride_(0),
       czarStride_(0),
@@ -1761,8 +1760,9 @@ public:
     if (muxClamp_ <= 0.0) error("MUXCLAMP must be > 0.");
     if (maxForce_ <= 0.0) error("MAXFORCE must be > 0.");
 
-    parse("GRIDSIZE", gridSize_); parse("GRIDPACE", gridPace_);
-    if (gridSize_ < 2) error("GRIDSIZE must be >= 2.");
+    unsigned gridSize = 72;
+    parse("GRIDSIZE", gridSize); parse("GRIDPACE", gridPace_);
+    if (gridSize < 2) error("GRIDSIZE must be >= 2.");
 
     bool noNlist = false;
     parseFlag("NONLIST", noNlist);
@@ -1817,7 +1817,7 @@ public:
       }
     }
 
-    gridN_.assign(dim_, gridSize_);
+    gridN_.assign(dim_, gridSize);
     gridDx_.resize(dim_);
     gridTotal_ = 1;
     for (unsigned d = 0; d < dim_; ++d) {
@@ -1870,7 +1870,7 @@ public:
       componentIsNotPeriodic(fictNames_[i]);
     }
 
-    log.printf("  [FKERNELABF v6.0.0] Force-kernel ABF + Kernel CZAR + density-based exploration (BAOAB, direct mean force, incremental grid)\n");
+    log.printf("  [FKERNELABF v7.0.1] Force-kernel ABF + Kernel CZAR + density-based exploration (BAOAB, direct mean force, incremental grid)\n");
     log.printf("  [FKERNELABF] CVs: ");
     for (unsigned i = 0; i < dim_; ++i)
       log.printf("%s%s", i?", ":"", getPntrToArgument(i)->getName().c_str());
@@ -2029,6 +2029,7 @@ public:
       for (unsigned i = 0; i < dim_; ++i)
         log.printf("%s%.5f", i?",":"", sigma0_[i]);
       log.printf(")\n");
+      adaptiveSigma_ = false;  // warmup complete; state file will now write adaptive_done=1
       sigDirty_ = true;
       zSigDirty_ = true;
     }
