@@ -1191,7 +1191,7 @@ private:
     std::FILE* f = std::fopen(path.c_str(), "w");
     if (!f) return;
 
-    std::fprintf(f, "# CZAR z-kernel file -- ForceKernelABF v7.0.1\n");
+    std::fprintf(f, "# CZAR z-kernel file -- ForceKernelABF v7.0.2\n");
     std::fprintf(f, "# Generated at step %lld\n", (long long)getStep());
     std::fprintf(f, "#\n");
     std::fprintf(f, "# KEY METADATA\n");
@@ -1254,7 +1254,7 @@ private:
     }
     f << std::setprecision(15);
 
-    f << "# FKERNELABF state file v7.0.1\n";
+    f << "# FKERNELABF state file v7.0.2\n";
     f << "# Written at step " << getStep() << "\n";
     f << "#\n";
 
@@ -1870,7 +1870,7 @@ public:
       componentIsNotPeriodic(fictNames_[i]);
     }
 
-    log.printf("  [FKERNELABF v7.0.1] Force-kernel ABF + Kernel CZAR + density-based exploration (BAOAB, direct mean force, incremental grid)\n");
+    log.printf("  [FKERNELABF v7.0.2] Force-kernel ABF + Kernel CZAR + density-based exploration (BAOAB, direct mean force, incremental grid)\n");
     log.printf("  [FKERNELABF] CVs: ");
     for (unsigned i = 0; i < dim_; ++i)
       log.printf("%s%s", i?", ":"", getPntrToArgument(i)->getName().c_str());
@@ -2044,7 +2044,7 @@ public:
     // (B) Accumulate lambda-kernel sample at s_fict_ (force clamped inside addSample).
     // Accumulate z-kernel sample at real CV z (unclamped, exact running mean).
     // Both happen at the same stride so lambda-kernel and z-kernel populations grow together.
-    if (pace_ > 0 && getStep() % pace_ == 0) {
+    if (pace_ > 0 && getStep() > 0 && getStep() % pace_ == 0) {
       addSample(s_fict_, work_springF_);
       addZSample(work_cv_, work_springF_);
     }
