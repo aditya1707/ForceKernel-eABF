@@ -77,7 +77,7 @@ Alternatively, it is possible for FKABF to set its own options, where an adaptiv
 
 | Keyword | Default | Description |
 |---------|---------|-------------|
-| `SIGMA` | *(auto)* | Initial kernel bandwidth σ₀. One value, one per CV, or **omit entirely** for adaptive mode (measures CV variance during an unbiased warmup). |
+| `SIGMA` | *(auto)* | Initial kernel bandwidth σ₀, effectively, the radius of the kernel. Setting this to half Gaussian width one would set for Metadynamics is a safe choice. One value, one per CV, or **omit entirely** for adaptive mode (measures CV variance during an unbiased warmup). |
 | `SIGMA_MIN` | *(none)* | Minimum bandwidth floor. Silverman rescaling and per-kernel variance will never shrink σ below this value. One value or one per CV. |
 | `ADAPTIVE_SIGMA_STRIDE` | `10 × PACE` | Number of unbiased warmup steps for automatic σ₀ determination (Welford online variance). Only used when `SIGMA` is omitted. During warmup: zero bias, no kernel deposition, λ tracks z. |
 | `FIXED_SIGMA` | `false` | Flag. If set, disables Silverman bandwidth rescaling — all kernels use σ₀ permanently. |
