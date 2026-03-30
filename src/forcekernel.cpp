@@ -58,7 +58,8 @@ private:
   //   pushes λ away from well-sampled basins toward under-sampled regions.
   //   Both Z and F_ex are updated at GRIDPACE intervals, synchronized with
   //   the ABF mean force.
-  // The CZAR estimator on z is completely unaffected.
+  // The CZAR estimator on z is not directly affected (exploration acts on λ only,
+  // though it indirectly influences z-kernel statistics through altered sampling).
   double biasFactor_;
   double Z0_density_;   // median-Z reference for density-based exploration (denominator)
   std::vector<double> explorScale_;  // per-CV scaling of exploration force (default 1.0)
@@ -73,7 +74,7 @@ private:
   struct Kernel {
     std::array<double,3> center = {};
     std::array<double,3> mu = {};      // mean force estimate (clamped, exact running mean)
-    std::array<double,3> sigma = {};
+    std::array<double,3> sigma = {};   // effective local bandwidth (not sample variance; see addSample)
     double Nk = 0.0;
     uint64_t id = 0;
   };
@@ -89,7 +90,7 @@ private:
   struct ZKernel {
     std::array<double,3> center = {};  // position in real CV space
     std::array<double,3> mu = {};      // unclamped mean of kappa(z - lambda)
-    std::array<double,3> sigma = {};
+    std::array<double,3> sigma = {};   // effective local bandwidth (see addZSample)
     double Nk = 0.0;
     uint64_t id = 0;
   };
@@ -190,8 +191,8 @@ private:
   bool zSigDirty_;
 
   // --- precomputed BAOAB thermostat constants ---
-  // Note it is unsafe to change timesteps mid-simulation because of this precompute
-  // Which should not be done anyway
+  // c1 = exp(-friction*dt), c2 = sqrt(kT/mass * (1 - c1^2))
+  // Computed once at first use; changing the timestep mid-simulation is unsupported.
   std::vector<double> baoab_c1_;  // exp(-friction[i] * dt) per dimension
   std::vector<double> baoab_c2_; // sqrt(kT/mass[i] * (1 - c1[i]^2))
   bool baoabReady_;
@@ -237,11 +238,11 @@ private:
   }
 
   // Silverman bandwidth for lambda-kernels.
-  // Uses nKernels_ (compressed kernel count), NOT totalN_ (raw sample count).
-  // Silverman's n = number of distinct locations being represented.
-  // After compression that is nKernels_; using totalN_ >> nKernels_ causes the bandwidth
-  // to shrink as if you had far more data than you do, hitting SIGMA_MIN
-  // prematurely and fragmenting the representation.
+  // Uses n_eff = totalN_^2 / sumNk2_, i.e. the effective sample size accounting
+  // for the unequal distribution of counts across kernels.  When all M kernels
+  // carry equal Nk = n, n_eff = (Mn)^2 / (Mn^2) = M (the kernel count).
+  // When one kernel dominates, n_eff -> 1.
+  // Falls back to nKernels_ only if sumNk2_ is zero (initial state).
   const std::vector<double>& currentSigma() {
     if (!sigDirty_) return cachedSig_;
     cachedSig_ = sigma0_;
@@ -543,6 +544,13 @@ private:
         double cs = ct + periodicDelta(i, ct, work_s_[i]);
         double c_new = (Nold * ct + cs) * inv_Nnew;
         double dt = ct - c_new, ds = cs - c_new;
+        // Per-kernel width update (Chan et al. pairwise merge).
+        // NB: the incoming sample is treated as a Gaussian of width sigma_global,
+        // NOT as a point (zero variance).  Consequently sigma_k is an effective
+        // local KDE bandwidth — the combined width of all absorbed Gaussians —
+        // rather than the literal spatial variance of the absorbed sample positions.
+        // This ensures that even a singleton kernel has a well-defined influence
+        // radius in the NW regression and prevents pathologically narrow kernels.
         double var = (Nold * (sq(kernels_[k].sigma[i]) + sq(dt)) +
                              (sq(sig[i])               + sq(ds))) * inv_Nnew;
         kernels_[k].center[i] = wrapToDomain(i, c_new);
@@ -556,7 +564,7 @@ private:
       for (unsigned i = 0; i < dim_; ++i) {
         nk.center[i] = work_s_[i];
         nk.mu[i] = work_f_[i];
-        nk.sigma[i] = sig[i];
+        nk.sigma[i] = sig[i];  // initial bandwidth = current Silverman σ_global (not zero)
       }
       nk.Nk = 1.0;
       nk.id = nextKernelId_++;
@@ -585,10 +593,13 @@ private:
   }
 
   // ================ z-kernel accumulation (CZAR) ================
-  // z-kernels are centred at the real CV z, store the unclamped spring force,
-  // and always use the exact running mean.
-  // No dirty tracking. z-kernels are not used for grid reconstruction,
-  // just for CZAR estimation at the current CV position.
+  // z-kernels are centred at the real CV z and store the unclamped spring force
+  // as a running mean.  They are NOT evaluated on a grid inside this module;
+  // they are written to file (writeCZARFile) for offline CZAR integration by
+  // czar_integrate.  The KDE normalization factor alpha_k = prod(sigma0/sigma_k)
+  // is applied at evaluation time in czar_integrate (not stored in the kernel
+  // data), so the raw Nk, center, mu, sigma written to file are unnormalized.
+  // sigma0 is written to the CZAR file header to enable this correction.
   void addZSample(const std::vector<double>& z_in,
                   const std::vector<double>& f_raw) {
     for (unsigned i = 0; i < dim_; ++i)
@@ -621,6 +632,8 @@ private:
         double cs = ct + periodicDelta(i, ct, work_z_[i]);
         double c_new = (Nold * ct + cs) * inv_Nnew;
         double dt = ct - c_new, ds = cs - c_new;
+        // Per-kernel width update: see comment in addSample — sigma_k is an
+        // effective local bandwidth, not the sample spatial variance.
         double var = (Nold * (sq(zKernels_[best].sigma[i]) + sq(dt)) +
                              (sq(sig[i])                   + sq(ds))) * inv_Nnew;
         zKernels_[best].center[i] = wrapToDomain(i, c_new);
@@ -634,7 +647,7 @@ private:
       for (unsigned i = 0; i < dim_; ++i) {
         nk.center[i] = work_z_[i];
         nk.mu[i]     = f_raw[i];
-        nk.sigma[i]  = sig[i];
+        nk.sigma[i]  = sig[i];  // initial bandwidth = current Silverman σ_global (not zero)
       }
       nk.Nk = 1.0;
       nk.id = nextZKernelId_++;
@@ -1199,14 +1212,14 @@ private:
   // ================ CZAR z-kernel file ================
   // Step-stamped snapshot of all z-kernels; never overwritten between writes.
   // The file header embeds kappa, kT, periodicity, and domain so that
-  // czar_integrate.py can reconstruct A(z) without access to the input file.
+  // czar_integrate can reconstruct A(z) without access to the input file.
   void writeCZARFile() {
     if (czarFile_.empty() || nZKernels_ == 0) return;
     std::string path = stampedPath(czarFile_);
     std::FILE* f = std::fopen(path.c_str(), "w");
     if (!f) return;
 
-    std::fprintf(f, "# CZAR z-kernel file -- ForceKernelABF v7.0.2\n");
+    std::fprintf(f, "# CZAR z-kernel file -- ForceKernelABF\n");
     std::fprintf(f, "# Generated at step %lld\n", (long long)getStep());
     std::fprintf(f, "#\n");
     std::fprintf(f, "# KEY METADATA\n");
@@ -1272,7 +1285,7 @@ private:
     }
     f << std::setprecision(15);
 
-    f << "# FKERNELABF state file v7.0.2\n";
+    f << "# FKERNELABF state file\n";
     f << "# Written at step " << getStep() << "\n";
     f << "#\n";
 
@@ -1427,7 +1440,7 @@ private:
           error("RESTART state file: kernel 'K' has Nk=" + std::to_string(nk.Nk)
                 + " <= 0. Corrupted state file.");
         if (nk.id == 0)
-          error("RESTART state file: kernel 'K' has id=0 — state file may be from a pre-v6 run.");
+          error("RESTART state file: kernel 'K' has id=0 — state file may be from an older format without stable IDs.");
         for (unsigned i = 0; i < dim_; ++i)
           if (nk.sigma[i] <= 0.0 || !std::isfinite(nk.sigma[i]))
             error("RESTART state file: kernel 'K' has sigma[" + std::to_string(i)
@@ -1450,7 +1463,7 @@ private:
           error("RESTART state file: z-kernel 'Z' has Nk=" + std::to_string(nk.Nk)
                 + " <= 0. Corrupted state file.");
         if (nk.id == 0)
-          error("RESTART state file: z-kernel 'Z' has id=0 — state file may be from a pre-v6 run.");
+          error("RESTART state file: z-kernel 'Z' has id=0 — state file may be from an older format without stable IDs.");
         for (unsigned i = 0; i < dim_; ++i)
           if (nk.sigma[i] <= 0.0 || !std::isfinite(nk.sigma[i]))
             error("RESTART state file: z-kernel 'Z' has sigma[" + std::to_string(i)
@@ -1602,12 +1615,12 @@ public:
 
     // Force clamps (safety nets — defaults are generous for most systems)
     keys.add("compulsory", "MUXCLAMP", "500.0",
-             "Per-kernel mean-force clamp (kJ/mol/rad). Individual kernel mu "
-             "values are hard-clamped to [-MUXCLAMP, +MUXCLAMP]. Only fires "
-             "for corrupted force samples at very sparse regions.");
+             "Per-kernel mean-force clamp (PLUMED internal units). Individual "
+             "kernel mu values are hard-clamped to [-MUXCLAMP, +MUXCLAMP]. "
+             "Only fires for corrupted force samples at very sparse regions.");
     keys.add("compulsory", "MAXFORCE", "500.0",
-             "Grid mean-force clamp (kJ/mol/rad). The NW mean force on the "
-             "grid is clamped per-node before interpolation. Only fires "
+             "Grid mean-force clamp (PLUMED internal units). The NW mean force "
+             "on the grid is clamped per-node before interpolation. Only fires "
              "for unphysically large force estimates.");
 
     // Grid
@@ -1636,7 +1649,7 @@ public:
     keys.add("optional", "CZARSTRIDE",
              "Write CZAR z-kernel file every N steps. Each write produces a "
              "step-stamped file {label}.czar_kernels_{step:08d}.dat. "
-             "Feed the final file to czar_integrate.py to recover A(z).");
+             "Feed the final file to czar_integrate to recover A(z).");
 
     // Restart state
     keys.add("optional", "STATESTRIDE",
@@ -1911,7 +1924,7 @@ public:
       componentIsNotPeriodic(fictNames_[i]);
     }
 
-    log.printf("  [FKERNELABF v7.0.2] Force-kernel ABF + Kernel CZAR + density-based exploration (BAOAB, direct mean force, incremental grid)\n");
+    log.printf("  [FKERNELABF] Force-kernel ABF + Kernel CZAR + density-based exploration (BAOAB, direct mean force, incremental grid)\n");
     log.printf("  [FKERNELABF] CVs: ");
     for (unsigned i = 0; i < dim_; ++i)
       log.printf("%s%s", i?", ":"", getPntrToArgument(i)->getName().c_str());
@@ -2036,6 +2049,10 @@ public:
     // ── Adaptive sigma warmup ─────────────────────────────────────────────────
     // During the warmup window: zero bias, no kernel deposition, collect variance.
     // s_fict_ tracks z directly so it starts at the right position when bias begins.
+    // NB: The Welford update uses periodicDelta, which handles wrapping correctly
+    // when the distribution is concentrated within ~half the periodic domain.
+    // For distributions spanning the branch cut, the variance estimate becomes
+    // path-dependent.  A post-warmup sanity check flags this case.
     if (adaptiveSigma_ && adaptiveCounter_ < adaptiveSigmaStride_) {
       adaptiveCounter_++;
       unsigned tau = adaptiveCounter_;
@@ -2070,6 +2087,22 @@ public:
       for (unsigned i = 0; i < dim_; ++i)
         log.printf("%s%.5f", i?",":"", sigma0_[i]);
       log.printf(")\n");
+      // Sanity check for periodic CVs: if sigma0 > domLen/4, the Welford estimate
+      // likely wrapped around the branch cut and is unreliable.  The online Welford
+      // algorithm with periodicDelta is only accurate when the distribution is
+      // concentrated within less than half the periodic domain.
+      for (unsigned i = 0; i < dim_; ++i) {
+        if (periodic_[i] && domLen_[i] > 0 && sigma0_[i] > 0.25 * domLen_[i]) {
+          log.printf("  [FKERNELABF] WARNING: adaptive sigma for periodic CV %u "
+                     "(%.4f) exceeds domLen/4 (%.4f). The CV may have explored across "
+                     "the periodic branch cut during warmup, making the variance "
+                     "estimate unreliable. Consider supplying SIGMA explicitly.\n",
+                     i, sigma0_[i], 0.25 * domLen_[i]);
+          // Clamp to domLen/4 as a safety measure
+          sigma0_[i] = 0.25 * domLen_[i];
+          log.printf("  [FKERNELABF]   -> clamped to %.5f\n", sigma0_[i]);
+        }
+      }
       adaptiveSigma_ = false;  // warmup complete; state file will now write adaptive_done=1
       sigDirty_ = true;
       zSigDirty_ = true;
