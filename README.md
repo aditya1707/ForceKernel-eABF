@@ -77,8 +77,8 @@ Alternatively, it is possible for FKABF to set its own options, where an adaptiv
 
 | Keyword | Default | Description |
 |---------|---------|-------------|
-| `SIGMA` | *(auto)* | Initial kernel bandwidth σ₀, effectively, the radius of the kernel. Setting this to half Gaussian width one would set for Metadynamics is a safe choice. One value, one per CV, or **omit entirely** for adaptive mode (measures CV variance during an unbiased warmup). |
-| `SIGMA_MIN` | *(none)* | Minimum bandwidth floor. Silverman rescaling and per-kernel variance will never shrink σ below this value. One value or one per CV. |
+| `SIGMA` | *(auto)* | Initial kernel bandwidth σ₀, effectively, the radius of the kernel. For Metadynamics users: setting this to half the Gaussian width one would set for Metadynamics is a safe choice. For ABF users, setting this to 2x the typical bin width is fine, where your kernels would be 4 times larger than the typical ABF bin. One value, one per CV, or **omit entirely** for adaptive mode (measures CV variance during an unbiased warmup). |
+| `SIGMA_MIN` | *(none)* | Minimum bandwidth floor. Silverman rescaling and per-kernel variance will never shrink σ below this value. Set at least 2x lower than SIGMA so the resolution of the free energy is enhanced with more sampling. One value or one per CV. |
 | `ADAPTIVE_SIGMA_STRIDE` | `10 × PACE` | Number of unbiased warmup steps for automatic σ₀ determination (Welford online variance). Only used when `SIGMA` is omitted. During warmup: zero bias, no kernel deposition, λ tracks z. |
 | `FIXED_SIGMA` | `false` | Flag. If set, disables Silverman bandwidth rescaling — all kernels use σ₀ permanently. |
 

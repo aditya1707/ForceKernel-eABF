@@ -710,7 +710,14 @@ private:
         work_gi1d_[d].push_back(gi);
       }
     }
-    const double sNk = sign * Nk;
+    // KDE normalization: weight by alpha_k = prod(sigma0/sigma_k) so that
+    // the NW denominator is proportional to a properly normalized KDE.
+    // This enters both numerator and denominator of the NW ratio (cancels
+    // partially) and fixes the density estimate used by the exploration force.
+    double alpha = 1.0;
+    for (unsigned d = 0; d < dim_; ++d)
+      alpha *= sigma0_[d] / (sigma[d] + 1e-300);
+    const double sNk = sign * Nk * alpha;
     if (dim_ == 1) {
       for (unsigned a = 0; a < work_w1d_[0].size(); ++a) {
         unsigned g = work_gi1d_[0][a]; double wNk = work_w1d_[0][a] * sNk;
@@ -788,7 +795,11 @@ private:
         }
       }
 
-      const double Nk_kk = kernels_[kk].Nk;
+      // KDE normalization: alpha_k = prod(sigma0/sigma_k)
+      double alpha_kk = 1.0;
+      for (unsigned d = 0; d < dim_; ++d)
+        alpha_kk *= sigma0_[d] / (kernels_[kk].sigma[d] + 1e-300);
+      const double Nk_kk = kernels_[kk].Nk * alpha_kk;
       if (dim_ == 1) {
         for (unsigned a = 0; a < work_w1d_[0].size(); ++a) {
           unsigned g = work_gi1d_[0][a]; double wNk = work_w1d_[0][a] * Nk_kk;
@@ -1081,7 +1092,11 @@ private:
         if (d2 > 0.25*sq(nsigmaCut_)) continue;
         double w = std::exp(-d2);
         if (w < 1e-300) continue;
-        double wNk = w * kernels_[kk].Nk;
+        // KDE normalization: alpha_k = prod(sigma0/sigma_k)
+        double alpha_kk = 1.0;
+        for (unsigned i = 0; i < dim_; ++i)
+          alpha_kk *= sigma0_[i] / (kernels_[kk].sigma[i] + 1e-300);
+        double wNk = w * kernels_[kk].Nk * alpha_kk;
         Z += wNk;
         for (unsigned i = 0; i < dim_; ++i) ghat[i] += wNk*kernels_[kk].mu[i];
       }
@@ -1208,6 +1223,9 @@ private:
     std::fprintf(f, "\n");
     std::fprintf(f, "domMax");
     for (unsigned i = 0; i < dim_; ++i) std::fprintf(f, " %.15g", domMax_[i]);
+    std::fprintf(f, "\n");
+    std::fprintf(f, "sigma0");
+    for (unsigned i = 0; i < dim_; ++i) std::fprintf(f, " %.15g", sigma0_[i]);
     std::fprintf(f, "\n");
     std::fprintf(f, "nkernels %u\n", nZKernels_);
     std::fprintf(f, "#\n");
@@ -1462,6 +1480,9 @@ private:
                  "Using actual count.\n", nZKernels_, (unsigned long)zKernels_.size());
       nZKernels_ = zKernels_.size();
     }
+    if (nKernels_ > 0 && zKernels_.empty())
+      log.printf("  [FKERNELABF] WARNING: lambda-kernels restored but no z-kernels found. "
+                 "CZAR history is lost; z-kernels will be rebuilt from scratch.\n");
 
     // Rebuild id→index maps and advance ID counters past all loaded IDs
     idMap_.clear();
@@ -1474,6 +1495,19 @@ private:
     for (unsigned k = 0; k < nZKernels_; ++k) {
       zIdMap_[zKernels_[k].id] = k;
       if (zKernels_[k].id >= nextZKernelId_) nextZKernelId_ = zKernels_[k].id + 1;
+    }
+
+    // Recompute aggregate scalars from actual kernel data (robust to truncation
+    // and resets any floating-point drift in the running sums).
+    totalN_ = 0; sumNk2_ = 0;
+    for (unsigned k = 0; k < nKernels_; ++k) {
+      totalN_ += kernels_[k].Nk;
+      sumNk2_ += kernels_[k].Nk * kernels_[k].Nk;
+    }
+    zTotalN_ = 0; zSumNk2_ = 0;
+    for (unsigned k = 0; k < nZKernels_; ++k) {
+      zTotalN_ += zKernels_[k].Nk;
+      zSumNk2_ += zKernels_[k].Nk * zKernels_[k].Nk;
     }
 
     // Clear dirty tracking — force a full grid rebuild on restart
@@ -1490,10 +1524,17 @@ private:
       znlistUpdate_ = true;
     }
 
-    // Skip adaptive sigma warmup since we restored learned sigma
+    // If adaptive sigma was completed before checkpoint, warmup is done
+    // and sigma0_ from the state file is valid. If NOT completed
+    // (adaptive_done=0), restart warmup from scratch rather than using
+    // the placeholder sigma0_ values.
     if (adaptiveSigma_) {
-      adaptiveSigma_ = false;
-      adaptiveCounter_ = adaptiveSigmaStride_ + 1;
+      // adaptive_done=0 was read (or never seen): warmup was interrupted.
+      adaptiveCounter_ = 0;
+      av_cv_.assign(dim_, 0.0);
+      av_M2_.assign(dim_, 0.0);
+      log.printf("  [FKERNELABF] WARNING: adaptive sigma warmup was "
+                 "incomplete at checkpoint. Restarting warmup from scratch.\n");
     }
 
     // Mark that first step should NOT re-initialise s_fict from z
