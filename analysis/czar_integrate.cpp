@@ -63,7 +63,8 @@ struct Meta {
 
 // ─────────────────────── file reader ────────────────────────────────────────
 
-bool parse_czar_file(const char *path, Meta &meta, std::vector<Kernel> &kernels) {
+bool parse_czar_file(const char *path, Meta &meta, std::vector<Kernel> &kernels,
+                     bool legacy_mode = false) {
     std::ifstream fh(path);
     if (!fh.is_open()) {
         fprintf(stderr, "ERROR: cannot open %s\n", path);
@@ -136,6 +137,20 @@ bool parse_czar_file(const char *path, Meta &meta, std::vector<Kernel> &kernels)
     if (meta.kT <= 0) {
         fprintf(stderr, "ERROR: kT not found or non-positive in %s\n", path);
         return false;
+    }
+    if ((int)meta.sigma0.size() != meta.dim) {
+        if (!legacy_mode) {
+            fprintf(stderr, "ERROR: sigma0 not found in %s\n", path);
+            fprintf(stderr, "  This file was written by an older version of FKERNELABF that\n");
+            fprintf(stderr, "  did not include sigma0 in the CZAR kernel file header.  The KDE\n");
+            fprintf(stderr, "  normalization (alpha_k = prod(sigma0/sigma_k)) cannot be applied\n");
+            fprintf(stderr, "  without sigma0, and the density gradient term of the CZAR\n");
+            fprintf(stderr, "  estimator will have a variable-bandwidth bias.\n");
+            fprintf(stderr, "  Re-run with current FKERNELABF to generate files that include\n");
+            fprintf(stderr, "  sigma0, or use --legacy to process with alpha_k=1 (old behavior).\n");
+            return false;
+        }
+        fprintf(stderr, "WARNING: sigma0 not found in %s; --legacy mode: alpha_k=1\n", path);
     }
     return true;
 }
@@ -635,16 +650,31 @@ void trapz_integrate_1d(
     const std::vector<bool> &allowed,
     int N,
     double dx,
+    bool periodic,
     // output:
     std::vector<double> &A)
 {
     A.assign(N, 0.0);
 
-    // Cumulative trapezoidal rule
+    // Cumulative trapezoidal rule: A(i) = integral of grad from 0 to i
     for (int i = 1; i < N; i++) {
         double g_prev = allowed[i-1] ? grad[i-1] : 0.0;
         double g_curr = allowed[i]   ? grad[i]   : 0.0;
         A[i] = A[i-1] + 0.5 * (g_prev + g_curr) * dx;
+    }
+
+    // For periodic CVs, enforce closure: the integral around the full
+    // cycle should be zero (dA/dz is the gradient of a periodic function).
+    // Any nonzero residual is a numerical artifact from finite sampling;
+    // distribute it linearly across all grid points.
+    if (periodic && N > 1) {
+        // The "missing" trapezoidal step from grid[N-1] back to grid[0]
+        double g_last  = allowed[N-1] ? grad[N-1] : 0.0;
+        double g_first = allowed[0]   ? grad[0]   : 0.0;
+        double closure = A[N-1] + 0.5 * (g_last + g_first) * dx;
+        // closure should ideally be zero; distribute the error linearly
+        for (int i = 0; i < N; i++)
+            A[i] -= closure * ((double)i / (double)N);
     }
 
     // Shift so min over allowed region = 0
@@ -815,7 +845,7 @@ void process_batch(const std::string &scan_dir,
                    int grid_pts, double nsigma, double minpop,
                    unsigned int mc_steps, double mc_hill,
                    double mc_hill_factor, bool verbose,
-                   long start_step)
+                   long start_step, bool legacy_mode)
 {
     printf("Scanning '%s' for *czar_kernels_*.dat ...\n", scan_dir.c_str());
     std::vector<std::string> snapshots = scan_for_czar_files(scan_dir);
@@ -854,7 +884,7 @@ void process_batch(const std::string &scan_dir,
 
         Meta meta;
         std::vector<Kernel> kernels;
-        if (!parse_czar_file(fpath.c_str(), meta, kernels)) {
+        if (!parse_czar_file(fpath.c_str(), meta, kernels, legacy_mode)) {
             printf("  Skipping %s: parse error\n", fpath.c_str());
             continue;
         }
@@ -879,7 +909,7 @@ void process_batch(const std::string &scan_dir,
         snprintf(outname, sizeof(outname), "%s/FEL_%08ld.dat", out_dir.c_str(), step);
 
         if (meta.dim == 1) {
-            trapz_integrate_1d(czar_grad, allowed, sizes[0], dx[0], A);
+            trapz_integrate_1d(czar_grad, allowed, sizes[0], dx[0], meta.periodic[0], A);
             write_simple_fel(outname, meta.dim, sizes, gmin, dx, A, allowed);
             printf("trapz -> FEL_%08ld.dat\n", step);
         } else {
@@ -917,7 +947,8 @@ static void print_help(const char *prog) {
     printf("  -S <step>       Start from this step number (skip earlier) [0]\n");
     printf("  -i <file>       Single-file mode (skip auto-scan)\n");
     printf("  -o <file>       Output file for single-file mode         [FEL_czar.dat]\n");
-    printf("  -v              Verbose output\n\n");
+    printf("  -v              Verbose output\n");
+    printf("  --legacy        Allow old kernel files without sigma0 (alpha_k=1)\n\n");
     printf("Examples:\n");
     printf("  %s FEL_snapshots                     # scan ., write to FEL_snapshots/\n", prog);
     printf("  %s FEL_snapshots -n 5000000          # fixed MC steps\n", prog);
@@ -943,6 +974,7 @@ int main(int argc, char *argv[]) {
     const char *scan_dir = ".";
     const char *out_dir = NULL;
     bool verbose = false;
+    bool legacy_mode = false;
     long start_step = 0;
 
     if (argc < 2) {
@@ -952,6 +984,10 @@ int main(int argc, char *argv[]) {
 
     // Parse command line
     for (int i = 1; i < argc; i++) {
+        if (strcmp(argv[i], "--legacy") == 0) {
+            legacy_mode = true;
+            continue;
+        }
         if (argv[i][0] == '-' && argv[i][1] != '\0') {
             switch (argv[i][1]) {
             case 'n': mc_steps = (unsigned int)atoi(argv[++i]); break;
@@ -981,7 +1017,7 @@ int main(int argc, char *argv[]) {
         Meta meta;
         std::vector<Kernel> kernels;
         printf("Reading CZAR kernels from: %s\n", single_input);
-        if (!parse_czar_file(single_input, meta, kernels)) return 1;
+        if (!parse_czar_file(single_input, meta, kernels, legacy_mode)) return 1;
 
         if (kT_override > 0) meta.kT = kT_override;
 
@@ -1009,7 +1045,7 @@ int main(int argc, char *argv[]) {
         std::vector<double> A;
         if (meta.dim == 1) {
             printf("Integrating via trapezoidal rule (1D) ...\n");
-            trapz_integrate_1d(czar_grad, allowed, sizes[0], dx[0], A);
+            trapz_integrate_1d(czar_grad, allowed, sizes[0], dx[0], meta.periodic[0], A);
             printf("  Trapezoidal integration complete.\n");
         } else {
             printf("Integrating via MC (%dD) ...\n", meta.dim);
@@ -1037,7 +1073,7 @@ int main(int argc, char *argv[]) {
     process_batch(std::string(scan_dir), std::string(out_dir),
                   grid_pts, nsigma, minpop,
                   mc_steps, mc_hill, mc_hill_factor, verbose,
-                  start_step);
+                  start_step, legacy_mode);
 
     return 0;
 }
