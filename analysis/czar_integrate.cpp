@@ -58,6 +58,7 @@ struct Meta {
     std::vector<double> kappa;
     std::vector<bool> periodic;
     std::vector<double> domMin, domMax;
+    std::vector<double> sigma0;  // initial bandwidth (for KDE normalization)
 };
 
 // ─────────────────────── file reader ────────────────────────────────────────
@@ -99,6 +100,9 @@ bool parse_czar_file(const char *path, Meta &meta, std::vector<Kernel> &kernels)
         } else if (key == "domMax") {
             meta.domMax.resize(meta.dim);
             for (int i = 0; i < meta.dim; i++) iss >> meta.domMax[i];
+        } else if (key == "sigma0") {
+            meta.sigma0.resize(meta.dim);
+            for (int i = 0; i < meta.dim; i++) iss >> meta.sigma0[i];
         } else if (key == "nkernels") {
             // informational; we count from data lines
         } else {
@@ -206,6 +210,16 @@ void czar_on_grid(
 
         const Kernel &kern = kernels[ki];
 
+        // KDE normalization: alpha_k = prod(sigma0/sigma_k) ensures the NW
+        // denominator is proportional to a properly normalized variable-bandwidth
+        // KDE. When sigma0 is unavailable (old files), alpha defaults to 1.0.
+        double alpha_k = 1.0;
+        if ((int)meta.sigma0.size() == dim) {
+            for (int d = 0; d < dim; d++)
+                alpha_k *= meta.sigma0[d] / (kern.sigma[d] + 1e-300);
+        }
+        const double Nk_eff = kern.Nk * alpha_k;
+
         // Per-dimension index range (box cutoff)
         std::vector<int> lo_idx(dim), hi_idx(dim);
         bool skip = false;
@@ -237,7 +251,7 @@ void czar_on_grid(
             if (dim == 1) {
                 double Gk = std::exp(-e0);
                 if (Gk < 1e-300) continue;
-                double wk = kern.Nk * Gk;
+                double wk = Nk_eff * Gk;
                 int g = id0;
                 ptilde[g] += wk;
                 sum_wkmu[g * dim + 0] += wk * kern.mu[0];
@@ -254,7 +268,7 @@ void czar_on_grid(
                     if (dim == 2) {
                         double Gk = std::exp(-(e0 + e1));
                         if (Gk < 1e-300) continue;
-                        double wk = kern.Nk * Gk;
+                        double wk = Nk_eff * Gk;
                         int g = id0 * sizes[1] + id1;
                         ptilde[g] += wk;
                         sum_wkmu[g * dim + 0] += wk * kern.mu[0];
@@ -272,7 +286,7 @@ void czar_on_grid(
 
                             double Gk = std::exp(-(e0 + e1 + e2));
                             if (Gk < 1e-300) continue;
-                            double wk = kern.Nk * Gk;
+                            double wk = Nk_eff * Gk;
                             int g = (id0 * sizes[1] + id1) * sizes[2] + id2;
                             ptilde[g] += wk;
                             sum_wkmu[g * dim + 0] += wk * kern.mu[0];
@@ -975,6 +989,13 @@ int main(int argc, char *argv[]) {
         printf("  periodic: ");
         for (int d = 0; d < meta.dim; d++) printf("%s%s", d?",":"", meta.periodic[d]?"true":"false");
         printf("\n");
+        if ((int)meta.sigma0.size() == meta.dim) {
+            printf("  sigma0: ");
+            for (int d = 0; d < meta.dim; d++) printf("%s%.6f", d?",":"", meta.sigma0[d]);
+            printf("  (KDE normalization active)\n");
+        } else {
+            printf("  sigma0: not found in file (old format); KDE normalization disabled\n");
+        }
 
         std::vector<double> ptilde, czar_grad;
         std::vector<int> sizes;
