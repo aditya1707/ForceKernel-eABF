@@ -323,9 +323,19 @@ void czar_on_grid(
         }
     }
 
-    // ── FD gradient of ln(ptilde) ───────────────────────────────────────────
-    // Matches DRR's getCountsLogDerivative: FD of ln(count)
+    // ── Build allowed mask (needed before FD gradient) ────────────────────
     double pmax = *std::max_element(ptilde.begin(), ptilde.end());
+    double pop_thresh = minpop * pmax;
+    allowed_out.resize(gridTotal);
+    for (int g = 0; g < gridTotal; g++)
+        allowed_out[g] = (ptilde[g] >= pop_thresh);
+
+    // ── FD gradient of ln(ptilde) ───────────────────────────────────────────
+    // Uses FD of ln(ptilde) on the grid, analogous to DRR's
+    // getCountsLogDerivative.  To avoid artificial gradients at exploration
+    // boundaries, we skip the FD when any stencil neighbor is below the
+    // population threshold — this prevents ln(pfloor) ≈ -41 from leaking
+    // into the gradient and inflating CZAR Term 2 at boundary-adjacent nodes.
     double pfloor = std::max(pmax * 1e-18, 1e-300);
     std::vector<double> ln_p(gridTotal);
     for (int g = 0; g < gridTotal; g++)
@@ -340,7 +350,7 @@ void czar_on_grid(
         double h = dx[d];
 
         for (int g = 0; g < gridTotal; g++) {
-            if (ptilde[g] <= 0) continue;
+            if (!allowed_out[g]) continue;
 
             // Compute index along dimension d
             int idx_d = (g / stride_d) % N_d;
@@ -348,44 +358,46 @@ void czar_on_grid(
             if (meta.periodic[d]) {
                 int g_next = g + ((idx_d + 1 < N_d) ? stride_d : -(N_d - 1) * stride_d);
                 int g_prev = g - ((idx_d > 0) ? stride_d : -(N_d - 1) * stride_d);
+                if (!allowed_out[g_next] || !allowed_out[g_prev]) continue;
                 grad_ln_p[g * dim + d] = (ln_p[g_next] - ln_p[g_prev]) / (2.0 * h);
             } else if (idx_d == 0) {
                 if (N_d >= 3) {
-                    // 2nd-order forward: (-3f0 + 4f1 - f2) / (2h)
-                    grad_ln_p[g * dim + d] = (-3.0 * ln_p[g] + 4.0 * ln_p[g + stride_d]
-                                              - ln_p[g + 2 * stride_d]) / (2.0 * h);
+                    int g1 = g + stride_d, g2 = g + 2 * stride_d;
+                    if (!allowed_out[g1] || !allowed_out[g2]) continue;
+                    grad_ln_p[g * dim + d] = (-3.0 * ln_p[g] + 4.0 * ln_p[g1]
+                                              - ln_p[g2]) / (2.0 * h);
                 } else {
-                    grad_ln_p[g * dim + d] = (ln_p[g + stride_d] - ln_p[g]) / h;
+                    int g1 = g + stride_d;
+                    if (!allowed_out[g1]) continue;
+                    grad_ln_p[g * dim + d] = (ln_p[g1] - ln_p[g]) / h;
                 }
             } else if (idx_d == N_d - 1) {
                 if (N_d >= 3) {
-                    // 2nd-order backward: (3fN - 4fN1 + fN2) / (2h)
-                    grad_ln_p[g * dim + d] = (3.0 * ln_p[g] - 4.0 * ln_p[g - stride_d]
-                                              + ln_p[g - 2 * stride_d]) / (2.0 * h);
+                    int g1 = g - stride_d, g2 = g - 2 * stride_d;
+                    if (!allowed_out[g1] || !allowed_out[g2]) continue;
+                    grad_ln_p[g * dim + d] = (3.0 * ln_p[g] - 4.0 * ln_p[g1]
+                                              + ln_p[g2]) / (2.0 * h);
                 } else {
-                    grad_ln_p[g * dim + d] = (ln_p[g] - ln_p[g - stride_d]) / h;
+                    int g1 = g - stride_d;
+                    if (!allowed_out[g1]) continue;
+                    grad_ln_p[g * dim + d] = (ln_p[g] - ln_p[g1]) / h;
                 }
             } else {
+                int g_next = g + stride_d, g_prev = g - stride_d;
+                if (!allowed_out[g_next] || !allowed_out[g_prev]) continue;
                 // Central difference
-                grad_ln_p[g * dim + d] = (ln_p[g + stride_d] - ln_p[g - stride_d]) / (2.0 * h);
+                grad_ln_p[g * dim + d] = (ln_p[g_next] - ln_p[g_prev]) / (2.0 * h);
             }
         }
     }
 
     // ── Assemble CZAR gradient ──────────────────────────────────────────────
     // dA/dz_i = -mu_NW_i - kT * d/dz_i ln(ptilde)
-    // (confirmed from DRR CZAR::getGradient)
     for (int g = 0; g < gridTotal; g++) {
         for (int d = 0; d < dim; d++) {
             czar_grad[g * dim + d] = -mu_NW[g * dim + d] - meta.kT * grad_ln_p[g * dim + d];
         }
     }
-
-    // ── Build allowed mask ──────────────────────────────────────────────────
-    double pop_thresh = minpop * pmax;
-    allowed_out.resize(gridTotal);
-    for (int g = 0; g < gridTotal; g++)
-        allowed_out[g] = (ptilde[g] >= pop_thresh);
 
     if (verbose) {
         int n_pop = 0;
