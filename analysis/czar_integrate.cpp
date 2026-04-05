@@ -253,7 +253,9 @@ void czar_on_grid(
 
         // Iterate over the box
         // For simplicity, support 1D, 2D, 3D explicitly
+        // Cutoff is spherical: sum of per-dimension exponents >= nsigma²
         std::vector<int> idx(dim);
+        const double cutoff2 = nsigma * nsigma;
         for (idx[0] = lo_idx[0]; idx[0] <= hi_idx[0]; idx[0]++) {
             int id0 = meta.periodic[0] ? ((idx[0] % sizes[0]) + sizes[0]) % sizes[0] : idx[0];
             double z0 = grid_coord(0, id0);
@@ -261,7 +263,7 @@ void czar_on_grid(
             if (meta.periodic[0] && period[0] > 0) dz0 = periodic_delta(dz0, period[0]);
             double inv4s0 = 1.0 / (4.0 * kern.sigma[0] * kern.sigma[0] + 1e-300);
             double e0 = dz0 * dz0 * inv4s0;
-            if (e0 >= nsigma * nsigma) continue;
+            if (e0 >= cutoff2) continue;  // early exit: e0 alone exceeds cutoff
 
             if (dim == 1) {
                 double Gk = std::exp(-e0);
@@ -278,7 +280,7 @@ void czar_on_grid(
                     if (meta.periodic[1] && period[1] > 0) dz1 = periodic_delta(dz1, period[1]);
                     double inv4s1 = 1.0 / (4.0 * kern.sigma[1] * kern.sigma[1] + 1e-300);
                     double e1 = dz1 * dz1 * inv4s1;
-                    if (e1 >= nsigma * nsigma) continue;
+                    if (e0 + e1 >= cutoff2) continue;  // spherical: total exponent
 
                     if (dim == 2) {
                         double Gk = std::exp(-(e0 + e1));
@@ -297,7 +299,7 @@ void czar_on_grid(
                             if (meta.periodic[2] && period[2] > 0) dz2 = periodic_delta(dz2, period[2]);
                             double inv4s2 = 1.0 / (4.0 * kern.sigma[2] * kern.sigma[2] + 1e-300);
                             double e2 = dz2 * dz2 * inv4s2;
-                            if (e2 >= nsigma * nsigma) continue;
+                            if (e0 + e1 + e2 >= cutoff2) continue;  // spherical: total exponent
 
                             double Gk = std::exp(-(e0 + e1 + e2));
                             if (Gk < 1e-300) continue;
