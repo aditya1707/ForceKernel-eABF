@@ -731,6 +731,10 @@ private:
     for (unsigned d = 0; d < dim_; ++d)
       alpha *= sigma0_[d] / (sigma[d] + 1e-300);
     const double sNk = sign * Nk * alpha;
+    // Spherical cutoff: reject when total exponent exceeds nsigmaCut_²/4.
+    // Since 1D weights are exp(-e_d), the product exp(-Σe_d) < this threshold
+    // means the point is outside the ellipsoidal cutoff.
+    const double sphereCut = std::exp(-0.25 * nsigmaCut_ * nsigmaCut_);
     if (dim_ == 1) {
       for (unsigned a = 0; a < work_w1d_[0].size(); ++a) {
         unsigned g = work_gi1d_[0][a]; double wNk = work_w1d_[0][a] * sNk;
@@ -740,7 +744,9 @@ private:
       for (unsigned a = 0; a < work_w1d_[0].size(); ++a) {
         double wa = work_w1d_[0][a];
         for (unsigned b = 0; b < work_w1d_[1].size(); ++b) {
-          double wNk = wa * work_w1d_[1][b] * sNk;
+          double wab = wa * work_w1d_[1][b];
+          if (wab < sphereCut) continue;  // ellipsoidal cutoff
+          double wNk = wab * sNk;
           unsigned g = work_gi1d_[0][a]*gridN_[1] + work_gi1d_[1][b];
           nwDenominator_[g] += wNk;
           nwNumerator_[g*2+0] += wNk * mu[0];
@@ -752,9 +758,12 @@ private:
         double wa = work_w1d_[0][a];
         for (unsigned b = 0; b < work_w1d_[1].size(); ++b) {
           double wab = wa * work_w1d_[1][b];
+          if (wab < sphereCut) continue;  // early exit: wab*wc <= wab
           unsigned gab = (work_gi1d_[0][a]*gridN_[1]+work_gi1d_[1][b])*gridN_[2];
           for (unsigned c = 0; c < work_w1d_[2].size(); ++c) {
-            double wNk = wab * work_w1d_[2][c] * sNk;
+            double wabc = wab * work_w1d_[2][c];
+            if (wabc < sphereCut) continue;  // ellipsoidal cutoff
+            double wNk = wabc * sNk;
             unsigned g = gab + work_gi1d_[2][c];
             nwDenominator_[g] += wNk;
             nwNumerator_[g*3+0] += wNk * mu[0];
@@ -776,6 +785,7 @@ private:
     if (nKernels_ == 0) return;
 
     std::vector<int> R(dim_), ic(dim_);
+    const double sphereCut = std::exp(-0.25 * nsigmaCut_ * nsigmaCut_);
 
     for (unsigned kk = 0; kk < nKernels_; ++kk) {
       for (unsigned d = 0; d < dim_; ++d) {
@@ -822,7 +832,9 @@ private:
         for (unsigned a = 0; a < work_w1d_[0].size(); ++a) {
           double wa = work_w1d_[0][a];
           for (unsigned b = 0; b < work_w1d_[1].size(); ++b) {
-            double wNk = wa * work_w1d_[1][b] * Nk_kk;
+            double wab = wa * work_w1d_[1][b];
+            if (wab < sphereCut) continue;  // ellipsoidal cutoff
+            double wNk = wab * Nk_kk;
             unsigned g = work_gi1d_[0][a]*gridN_[1]+work_gi1d_[1][b];
             nwDenominator_[g] += wNk;
             nwNumerator_[g*2+0] += wNk*kernels_[kk].mu[0];
@@ -834,9 +846,12 @@ private:
           double wa = work_w1d_[0][a];
           for (unsigned b = 0; b < work_w1d_[1].size(); ++b) {
             double wab = wa * work_w1d_[1][b];
+            if (wab < sphereCut) continue;  // early exit
             unsigned gab = (work_gi1d_[0][a]*gridN_[1]+work_gi1d_[1][b])*gridN_[2];
             for (unsigned c = 0; c < work_w1d_[2].size(); ++c) {
-              double wNk = wab*work_w1d_[2][c] * Nk_kk;
+              double wabc = wab*work_w1d_[2][c];
+              if (wabc < sphereCut) continue;  // ellipsoidal cutoff
+              double wNk = wabc * Nk_kk;
               unsigned g = gab + work_gi1d_[2][c];
               nwDenominator_[g] += wNk;
               nwNumerator_[g*3+0] += wNk*kernels_[kk].mu[0];
