@@ -262,6 +262,28 @@ python fkabf_diagnostics.py --thinning 2
 
 A text summary of the run (CV ranges, z−λ standard deviation, final kernel counts, compression ratio, convergence metrics) is printed to stdout before figure generation.
 
+<br>
+
+---
+
+<br>
+
+### 5. Validating your results
+
+FK-eABF is designed to converge quickly, but fast convergence does not absolve the practitioner of proving that convergence has actually been achieved. A free-energy surface that looks reasonable is not the same as one that is correct. The following checks should be treated as mandatory, not optional, regardless of how well the FEL appears to have converged.
+
+#### Verify extended-system synchronization
+
+FK-eABF, like all extended-system ABF methods, relies on the fictitious variable λ remaining well coupled to the real CV z. If the two desynchronize, the CZAR estimator receives corrupted force samples. After every production run, verify that the distribution of z − λ is centered at zero with a width consistent with the coupling strength, i.e., σ ≈ √(kT/κ). The `fkabf_diagnostics.py` tool produces this histogram automatically (`fig_phase.pdf` and `fig_trajectory.pdf`). If the distribution is bimodal, skewed, or substantially broader than expected, the coupling is too weak and κ or τ should be adjusted before trusting the result.
+
+#### Run multiple independent replicas
+
+A single trajectory that appears converged may have settled into a local minimum of the free-energy estimator without adequately sampling all relevant basins. Run at least two, preferably three, independent replicas from different initial conditions and compare the resulting FELs. Agreement between replicas, not internal smoothness of a single run, is the minimum standard of evidence for convergence. The CZAR kernel snapshots written at `CZARSTRIDE` intervals allow convergence to be monitored over time for each replica independently.
+
+#### Perform cross-method validation
+
+Self-consistency within a single method is a necessary but not sufficient condition for correctness. As demonstrated in the benchmarking study accompanying this work (Kang et al.), simulations can satisfy every standard self-convergence criterion while producing quantitatively incorrect free-energy profiles. For at least one system in any study, run a parallel calculation using an independent enhanced-sampling method, such as OPES, WTM-eABF, or REUS, and compare the resulting FELs. If two methods with fundamentally different biasing strategies recover the same surface, the result is far more trustworthy than any amount of self-convergence analysis from a single method. Cross-method agreement is not merely good practice; it is the only reliable criterion currently available for validating free-energy calculations on systems where the true answer is unknown.
+
 
 
 
