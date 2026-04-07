@@ -46,7 +46,7 @@ fk: FKERNELABF ...
 
     # Output options
     CZARSTRIDE=50000      # steps between CZAR kernel file writes
-    KERNELINFOSTRIDE=500  # steps for writing kernel information  
+    KERNELINFOSTRIDE=500  # recommended: match your PRINT STRIDE (default is PACE, which is too frequent)
 ...
 
 PRINT FILE=COLVAR STRIDE=500 ARG=*
@@ -106,7 +106,7 @@ All filenames are derived from the PLUMED action label (e.g., `fk: FKERNELABF ..
 | `KERNELSTRIDE` | *(off)* | Write a step-stamped λ-kernel snapshot every N steps → `{label}.kernels_{step:08d}.dat`. |
 | `LAMBDAGRIDSTRIDE` | *(off)* | Write the NW mean-force debug grid every N steps → `{label}.lambda_grid_{step:08d}.dat`. This is the bias force on the λ grid, **not** the free energy. |
 | `STATESTRIDE` | `CZARSTRIDE` or `10 × GRIDPACE` | Write restart state file every N steps → `{label}.state.dat`. Overwritten in place. Read automatically on `RESTART`. |
-| `KERNELINFOSTRIDE` | `PACE` | Append one line of kernel diagnostics every N steps → `{label}.kernelinfo.dat`. Columns: step, M, zM, neff, σ per CV, nlker. |
+| `KERNELINFOSTRIDE` | `PACE` | Append one line of kernel diagnostics every N steps → `{label}.kernelinfo.dat`. Columns: step, M, zM, neff, σ per CV, nlker. **The default (PACE) writes at every kernel deposition, which can be very frequent (e.g. every 1–5 steps) and slow the simulation with I/O overhead. Set this explicitly to match your PRINT STRIDE or higher (e.g. `KERNELINFOSTRIDE=500`).** |
 
 <br>
 
