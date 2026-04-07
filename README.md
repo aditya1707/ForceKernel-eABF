@@ -1,14 +1,14 @@
-# Force Kernel ABF
+# FK-eABF
 
-A toolkit for running Force Kernel ABF (FKERNELABF) enhanced sampling simulations in PLUMED and recovering free energy landscapes from the results.
+A toolkit for running FK-eABF (Force-Kernel eABF) enhanced sampling simulations in PLUMED and recovering free energy landscapes from the results.
 
-FKERNELABF is an adaptive biasing force method that uses an extended Lagrangian (fictitious particle λ coupled to the real collective variable z) and a kernel-based mean force estimator. The CZAR estimator on the real CV z provides an unbiased free energy gradient that is integrated into a free energy landscape in post-processing.
+FK-eABF is an adaptive biasing force method that uses an extended Lagrangian (fictitious particle λ coupled to the real collective variable z) and a kernel-based mean force estimator. The CZAR estimator on the real CV z provides an unbiased free energy gradient that is integrated into a free energy landscape in post-processing.
 
 ---
 
 ## Requirements
 
-- PLUMED (with `forcekernelabf_v5_0_0.cpp` compiled as a plugin via `LOAD`)
+- PLUMED (with `forcekernel.cpp` compiled as a plugin via `LOAD`)
 - A MD engine supported by PLUMED, or the built-in `pesmd` toy integrator for 2D potentials
 - Python 3 with NumPy and SciPy for post-processing
 
@@ -16,12 +16,12 @@ FKERNELABF is an adaptive biasing force method that uses an extended Lagrangian 
 
 ## Workflow
 
-### 1. Setting up a FKABF simulation
+### 1. Setting up an FK-eABF simulation
 
 The plugin is loaded at runtime via the PLUMED `LOAD` directive — no recompilation of PLUMED is required. Configure your `plumed.dat` to load the plugin and define the `FKERNELABF` action:
 
 ```plumed
-LOAD FILE=./forcekernelabf_v5_0_0.cpp
+LOAD FILE=./forcekernel.cpp
 
 cv: <YOUR_CV_DEFINITION>
 
@@ -36,7 +36,7 @@ fk: FKERNELABF ...
     FRICTION=8.0          # Langevin friction (ps^-1)
     TEMP=300              # temperature (K)
 
-    #FKABF Options
+    # FK-eABF Options
     GRIDMIN=-1.5          # CV domain lower bound
     GRIDMAX=1.5           # CV domain upper bound
     SIGMA=0.05            # initial kernel width
@@ -52,7 +52,7 @@ fk: FKERNELABF ...
 PRINT FILE=COLVAR STRIDE=500 ARG=*
 ```
 
-Alternatively, it is possible for FKABF to set its own options, where an adaptive sigma is determined based on 10xPACE (or set with 'ADAPTIVE_SIGMA_STRIDE'), and the default data aquisition (PACE) and force-field update frequency (GRIDPACE) are often sufficient for learning the gradient in classical simulations.
+Alternatively, it is possible for FK-eABF to set its own options, where an adaptive sigma is determined based on 10xPACE (or set with 'ADAPTIVE_SIGMA_STRIDE'), and the default data aquisition (PACE) and force-field update frequency (GRIDPACE) are often sufficient for learning the gradient in classical simulations.
 
 #### Compulsory Keywords
 
@@ -147,7 +147,7 @@ czar_integrate only requires one argument: the directory for depositing the PMFs
 
 For 1D systems, integration uses the trapezoidal rule. For 2D and higher, integration uses a metadynamics-style MC random walk (same conventions as `abf_integrate`).
 
-The CZAR kernel files written by FKERNELABF include a `sigma0` header that enables proper KDE normalization (α_k = ∏ σ₀/σ_k) for variable-bandwidth kernels.
+The CZAR kernel files written by FK-eABF include a `sigma0` header that enables proper KDE normalization (α_k = ∏ σ₀/σ_k) for variable-bandwidth kernels.
 
 #### Options
 
