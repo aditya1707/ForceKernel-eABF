@@ -52,7 +52,7 @@ fk: FKERNELABF ...
 PRINT FILE=COLVAR STRIDE=500 ARG=*
 ```
 
-Alternatively, it is possible for FK-eABF to set its own options, where an adaptive sigma is determined based on 10xPACE (or set with 'ADAPTIVE_SIGMA_STRIDE'), and the default data aquisition (PACE) and force-field update frequency (GRIDPACE) are often sufficient for learning the gradient in classical simulations.
+Alternatively, it is possible for FK-eABF to set its own options, where an adaptive sigma is determined based on 10xPACE (or set with 'ADAPTIVE_SIGMA_STRIDE'), and the default data aquisition (PACE) and force-field update frequency (GRIDPACE) are often sufficient for learning the gradient in classical simulations. However, it is still paramount to set a lower bound for the bandwidth via `SIGMA_MIN` to prevent the kernel population from growing unnecessarily as the Silverman bandwidth contracts. Practitioners familiar with metadynamics or eABF can use their usual settings as a guide: because `SIGMA` defines the kernel radius rather than a full bin width, the appropriate value is roughly half the bin width one would use for eABF. For example, a bin width of 0.1 Å corresponds to a `SIGMA_MIN` of approximately 0.05 Å.
 
 #### Compulsory Keywords
 
