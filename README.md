@@ -1,14 +1,14 @@
-# Force Kernel ABF
+# FK-eABF
 
-A toolkit for running Force Kernel ABF (FKERNELABF) enhanced sampling simulations in PLUMED and recovering free energy landscapes from the results.
+A toolkit for running FK-eABF (Force-Kernel eABF) enhanced sampling simulations in PLUMED and recovering free energy landscapes from the results.
 
-FKERNELABF is an adaptive biasing force method that uses an extended Lagrangian (fictitious particle λ coupled to the real collective variable z) and a kernel-based mean force estimator. The CZAR estimator on the real CV z provides an unbiased free energy gradient that is integrated into a free energy landscape in post-processing.
+FK-eABF is an adaptive biasing force method that uses an extended Lagrangian (fictitious particle λ coupled to the real collective variable z) and a kernel-based mean force estimator. The CZAR estimator on the real CV z provides an unbiased free energy gradient that is integrated into a free energy landscape in post-processing.
 
 ---
 
 ## Requirements
 
-- PLUMED (with `forcekernelabf_v5_0_0.cpp` compiled as a plugin via `LOAD`)
+- PLUMED (with `forcekernel.cpp` compiled as a plugin via `LOAD`)
 - A MD engine supported by PLUMED, or the built-in `pesmd` toy integrator for 2D potentials
 - Python 3 with NumPy and SciPy for post-processing
 
@@ -16,12 +16,12 @@ FKERNELABF is an adaptive biasing force method that uses an extended Lagrangian 
 
 ## Workflow
 
-### 1. Setting up a FKABF simulation
+### 1. Setting up an FK-eABF simulation
 
 The plugin is loaded at runtime via the PLUMED `LOAD` directive — no recompilation of PLUMED is required. Configure your `plumed.dat` to load the plugin and define the `FKERNELABF` action:
 
 ```plumed
-LOAD FILE=./forcekernelabf_v5_0_0.cpp
+LOAD FILE=./forcekernel.cpp
 
 cv: <YOUR_CV_DEFINITION>
 
@@ -36,7 +36,7 @@ fk: FKERNELABF ...
     FRICTION=8.0          # Langevin friction (ps^-1)
     TEMP=300              # temperature (K)
 
-    #FKABF Options
+    # FK-eABF Options
     GRIDMIN=-1.5          # CV domain lower bound
     GRIDMAX=1.5           # CV domain upper bound
     SIGMA=0.05            # initial kernel width
@@ -46,13 +46,13 @@ fk: FKERNELABF ...
 
     # Output options
     CZARSTRIDE=50000      # steps between CZAR kernel file writes
-    KERNELINFOSTRIDE=500  # steps for writing kernel information  
+    KERNELINFOSTRIDE=500  # recommended: match your PRINT STRIDE (default is PACE, which is too frequent)
 ...
 
 PRINT FILE=COLVAR STRIDE=500 ARG=*
 ```
 
-Alternatively, it is possible for FKABF to set its own options, where an adaptive sigma is determined based on 10xPACE (or set with 'ADAPTIVE_SIGMA_STRIDE'), and the default data aquisition (PACE) and force-field update frequency (GRIDPACE) are often sufficient for learning the gradient in classical simulations.
+Alternatively, it is possible for FK-eABF to set its own options, where an adaptive sigma is determined based on 10xPACE (or set with 'ADAPTIVE_SIGMA_STRIDE'), and the default data aquisition (PACE) and force-field update frequency (GRIDPACE) are often sufficient for learning the gradient in classical simulations. However, it is still paramount to set a lower bound for the bandwidth via `SIGMA_MIN` to prevent the kernel population from growing unnecessarily as the Silverman bandwidth contracts. Practitioners familiar with metadynamics or eABF can use their usual settings as a guide: because `SIGMA` defines the kernel radius rather than a full bin width, the appropriate value is roughly half the bin width one would use for eABF. For example, a bin width of 0.1 Å corresponds to a `SIGMA_MIN` of approximately 0.05 Å.
 
 #### Compulsory Keywords
 
@@ -106,7 +106,7 @@ All filenames are derived from the PLUMED action label (e.g., `fk: FKERNELABF ..
 | `KERNELSTRIDE` | *(off)* | Write a step-stamped λ-kernel snapshot every N steps → `{label}.kernels_{step:08d}.dat`. |
 | `LAMBDAGRIDSTRIDE` | *(off)* | Write the NW mean-force debug grid every N steps → `{label}.lambda_grid_{step:08d}.dat`. This is the bias force on the λ grid, **not** the free energy. |
 | `STATESTRIDE` | `CZARSTRIDE` or `10 × GRIDPACE` | Write restart state file every N steps → `{label}.state.dat`. Overwritten in place. Read automatically on `RESTART`. |
-| `KERNELINFOSTRIDE` | `PACE` | Append one line of kernel diagnostics every N steps → `KERNELINFO`. Columns: step, M, zM, neff, σ per CV, nlker. |
+| `KERNELINFOSTRIDE` | `PACE` | Append one line of kernel diagnostics every N steps → `{label}.kernelinfo.dat`. Columns: step, M, zM, neff, σ per CV, nlker. **The default (PACE) writes at every kernel deposition, which can be very frequent (e.g. every 1–5 steps) and slow the simulation with I/O overhead. Set this explicitly to match your PRINT STRIDE or higher (e.g. `KERNELINFOSTRIDE=500`).** |
 
 <br>
 
@@ -145,6 +145,10 @@ The executable can now be used to process the czar_kernel files:
 ```
 czar_integrate only requires one argument: the directory for depositing the PMFs. Else, czar_integrate can read files in a specified directory (-d) and for all files matching `*czar_kernels_XXXXXXXX.dat`, integrates, and writes `FEL_XXXXXXXX.dat` to the output directory.
 
+For 1D systems, integration uses the trapezoidal rule. For 2D and higher, integration uses a metadynamics-style MC random walk (same conventions as `abf_integrate`).
+
+The CZAR kernel files written by FK-eABF include a `sigma0` header that enables proper KDE normalization (α_k = ∏ σ₀/σ_k) for variable-bandwidth kernels.
+
 #### Options
 
 | Flag | Argument | Default | Description |
@@ -160,7 +164,7 @@ czar_integrate only requires one argument: the directory for depositing the PMFs
 | `-i` | `<file>` | — | Process a single kernel file instead of scanning. |
 | `-o` | `<file>` | `FEL_czar.dat` | Output filename (single-file mode only). |
 | `-v` | — | off | Verbose: print per-step RMSD, hill scaling, and convergence diagnostics. |
-| `-S` | — | off | Skip kernel files before some step number |
+| `-S` | `<step>` | `0` | Start from this step number; kernel files before this step are skipped. |
 
 #### Examples
 
@@ -195,7 +199,14 @@ czar_integrate only requires one argument: the directory for depositing the PMFs
 | `ptilde` | Biased density (NW denominator) at each grid point |
 | `A_czar` | Free energy (kJ/mol), shifted so the minimum is zero |
 
-Points below the population threshold are written as `nan`. For 2D+ grids, blank lines separate slices along the first dimension (gnuplot `pm3d` compatible).
+**Batch mode** (default): a simpler format with columns:
+
+| Column | Description |
+|--------|-------------|
+| `z0`, `z1`, ... | Grid coordinates (one per CV dimension) |
+| `A` | Free energy (kJ/mol), shifted so the minimum is zero |
+
+In both modes, points below the population threshold are written as `nan`. For 2D+ grids, blank lines separate slices along the first dimension (gnuplot `pm3d` compatible).
 
 <br>
 
@@ -205,7 +216,7 @@ Points below the population threshold are written as `nan`. For 2D+ grids, blank
 
 ### 4. Additional diagnosis 
 
-As an additional diagnostic tool, fkabf_diagnostics.py can be used to process the COLVAR file and the KERNELINFO file in the current directory:
+As an additional diagnostic tool, fkabf_diagnostics.py can be used to process the COLVAR file and the `{label}.kernelinfo.dat` file in the current directory:
 ```bash
  python fkabf_diagnostics.py
 ```
@@ -215,7 +226,7 @@ As an additional diagnostic tool, fkabf_diagnostics.py can be used to process th
 | Flag | Argument | Default | Description |
 |------|----------|---------|-------------|
 | `--colvar` | `<file>` | `COLVAR` | Path to the PLUMED COLVAR file. |
-| `--kernelinfo` | `<file>` | `KERNELINFO` | Path to the KERNELINFO file. If absent, kernel diagnostic plots are skipped. |
+| `--kernelinfo` | `<file>` | *(auto)* | Path to the `{label}.kernelinfo.dat` file. If absent, kernel diagnostic plots are skipped. |
 | `--prefix` | `<label>` | *(auto)* | PLUMED action label prefix (e.g., `fk`). Auto-detected from `_fict` column names if not set. |
 | `--dt` | `<float>` | `0.001` | MD timestep in time units. Used to convert the `time` column to step numbers. |
 | `--thinning` | `<int>` | `10` | Thinning factor for scatter and trajectory plots. Every Nth point is plotted. |
@@ -229,7 +240,7 @@ As an additional diagnostic tool, fkabf_diagnostics.py can be used to process th
 python fkabf_diagnostics.py
 
 # Specify files and output location
-python fkabf_diagnostics.py --colvar COLVAR --kernelinfo KERNELINFO --outdir plots/
+python fkabf_diagnostics.py --colvar COLVAR --kernelinfo fk.kernelinfo.dat --outdir plots/
 
 # Alanine dipeptide with periodic CVs
 python fkabf_diagnostics.py --periodic "phi:-pi:pi,psi:-pi:pi" --dt 0.002
@@ -244,7 +255,7 @@ python fkabf_diagnostics.py --thinning 2
 |------|----------|
 | `fig_trajectory.pdf` | Per-CV row with three columns: (a) z and λ time series, (b) z−λ difference over time, (c) histogram of z−λ. For periodic CVs (`--periodic`), the minimum-image difference is used. |
 | `fig_bias.pdf` | (a) Bias force magnitude \|F_bias\| over time, (b) exploration potential V_ex over time. |
-| `fig_kernels.pdf` | From KERNELINFO: (a) kernel counts M and M_z, (b) n_eff and compression ratio N/M, (c) Silverman σ per CV, (d) Z₀ and Z(λ) if present. |
+| `fig_kernels.pdf` | From `{label}.kernelinfo.dat`: (a) kernel counts M and M_z, (b) n_eff and compression ratio N/M, (c) Silverman σ per CV, (d) Z₀ and Z(λ) if present. |
 | `fig_exploration.pdf` | Side-by-side 2D scatter: (a) real CV trajectory, (b) λ trajectory, both colored by simulation time. Only produced for 2+ CVs. |
 | `fig_phase.pdf` | z vs λ scatter per CV, colored by time. Points should cluster along the identity line; spread indicates coupling width √(kT/κ). |
 | `fig_nlist.pdf` | Neighbor list size over time, with nlker/M fraction on a twin axis. |
