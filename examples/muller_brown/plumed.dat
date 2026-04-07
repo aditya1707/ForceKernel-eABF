@@ -1,4 +1,4 @@
-LOAD FILE=./forcekernelabf_v5_0_0.cpp
+LOAD FILE=./forcekernel.cpp
 
 UNITS NATURAL
 
@@ -22,54 +22,34 @@ ff: MATHEVAL ...
 # --- Apply the potential ---
 bb: BIASVALUE ARG=ff
 
-
-#eabf: DRR ...
-#   ARG=d1.x,d1.y 
-#   FULLSAMPLES=500 
-#   GRID_MIN=-1.5,-0.5 
-#   GRID_MAX=1.5,2.5
-#   GRID_BIN=100,100 
-#   FRICTION=8.0,8.0 
-#   TAU=0.5,0.5
-#   TEMP=1 
-#   OUTPUTFREQ=50000 
-#   HISTORYFREQ=500000 
-#...
-
 fk: FKERNELABF ...
 
     ARG=d1.x,d1.y
 
     # Extended Lagrangian
-    KAPPA=3000.0,3000.0       # kJ/mol/nm^2 — coupling width sqrt(kT/kappa)=0.022 nm
-    TAU=0.5,0.5              # ps
-    FRICTION=8.0        # ps^-1
+    KAPPA=3000.0,3000.0    
+    TAU=0.5,0.5             
+    FRICTION=8.0       
     TEMP=1
 
     # Kernel representation
     # Non-periodic: GRIDMIN/GRIDMAX required
     GRIDMIN=-1.5,-0.5
     GRIDMAX=1.5,2.5
-    SIGMA=0.05,0.05           # nm — initial kernel width (~1/10 of domain)
-    SIGMA_MIN=0.01,0.01       # nm — floor: ~1.5*sqrt(kT/kappa)
+    SIGMA=0.05,0.05        
+    SIGMA_MIN=0.01,0.01 
     PACE=5
     GRIDPACE=1000
-    GRIDSIZE=100
 
     # Boost (helpful for early exploration of 3-basin surface)
     BIASFACTOR=1
 
     # Output
-    KERNELSTRIDE=50000
     CZARSTRIDE=50000
-    # KERNELINFOSTRIDE=50   # optional: override default stride (PACE) to match PRINT STRIDE
+    KERNELINFOSTRIDE=50   # optional: override default stride (PACE) to match PRINT STRIDE
                             # KERNELINFO is always written automatically by the plugin
                             # pass to fkabf_analysis.py via --kernelinfo KERNELINFO
 ...
 
-#UPPER_WALLS ARG=d1.x AT=1.2  KAPPA=1500
-#LOWER_WALLS ARG=d1.x AT=-1.4 KAPPA=1500
-#UPPER_WALLS ARG=d1.y AT=2.0  KAPPA=1500
-#LOWER_WALLS ARG=d1.y AT=-0.2 KAPPA=1500
 
 PRINT FILE=COLVAR STRIDE=50 ARG=*
