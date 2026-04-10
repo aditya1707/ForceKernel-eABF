@@ -61,7 +61,7 @@ Several parameters in the example above can be set automatically, but should be 
 
 **GRIDSIZE.** The mean-force grid is where the NW regression is evaluated and then multilinearly interpolated between GRIDPACE rebuilds. The grid resolution does not affect the kernel accumulation or the free energy itself, but it directly controls how faithfully the cancellation force is applied to the fictitious particle between grid updates. If the grid is too coarse relative to the kernel bandwidth, the interpolated force is a poor approximation of the smooth kernel field, and the biasing force is applied inefficiently. By default (`GRIDSIZE=0`), FK-eABF auto-sizes the grid from `SIGMA_MIN` so that the grid spacing equals twice the minimum bandwidth (the effective kernel diameter), with a floor of 72 points per dimension. For a dihedral angle (range 2π, `SIGMA_MIN` = 0.04 rad), the auto-sized grid is 79 points. For a permeation distance (range 80 Å, `SIGMA_MIN` = 0.1 Å), the auto-sized grid is 400 points, consistent with the 0.2 Å bin spacing commonly adopted in ABF. If `SIGMA_MIN` is not set, the grid defaults to 72 points. If the user explicitly sets `GRIDSIZE` to a value that would produce spacing coarser than `2 × SIGMA_MIN`, a warning is printed to the PLUMED log but the simulation proceeds normally.
 
-> **TLDR; set `SIGMA`, `SIGMA_MIN`, and `GRIDSIZE` (plus `GRIDMIN`/`GRIDMAX` for non-periodic CVs). Everything else can be left at its default.**
+**TLDR; set `SIGMA`, `SIGMA_MIN`, and `GRIDSIZE` (plus `GRIDMIN`/`GRIDMAX` for non-periodic CVs). Everything else can be left at its default.**
 
 #### Compulsory Keywords
 
