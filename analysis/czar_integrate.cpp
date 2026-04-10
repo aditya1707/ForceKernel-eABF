@@ -20,7 +20,7 @@
  *   -h <height>     Initial hill height                      [default: 0.01]
  *   -f <factor>     Hill reduction factor                    [default: 0.5]
  *   -t <kT>         Override kT from file (kJ/mol)           [default: from file]
- *   -g <pts>        Grid points per dimension                [default: 100]
+ *   -g <pts>        Grid points per dimension (0 = auto)     [default: 0]
  *   -s <nsigma>     Kernel cutoff in sigma units             [default: 4.0]
  *   -m <minpop>     Min density fraction for allowed region  [default: 1e-3]
  *   -i <file>       Process a single kernel file instead of scanning
@@ -58,7 +58,8 @@ struct Meta {
     std::vector<double> kappa;
     std::vector<bool> periodic;
     std::vector<double> domMin, domMax;
-    std::vector<double> sigma0;  // initial bandwidth (for KDE normalization)
+    std::vector<double> sigma0;     // initial bandwidth (for KDE normalization)
+    std::vector<double> sigma_min;  // minimum bandwidth (for auto grid sizing)
 };
 
 // ─────────────────────── file reader ────────────────────────────────────────
@@ -104,6 +105,9 @@ bool parse_czar_file(const char *path, Meta &meta, std::vector<Kernel> &kernels,
         } else if (key == "sigma0") {
             meta.sigma0.resize(meta.dim);
             for (int i = 0; i < meta.dim; i++) iss >> meta.sigma0[i];
+        } else if (key == "sigma_min") {
+            meta.sigma_min.resize(meta.dim);
+            for (int i = 0; i < meta.dim; i++) iss >> meta.sigma_min[i];
         } else if (key == "nkernels") {
             // informational; we count from data lines
         } else {
@@ -161,12 +165,33 @@ static inline double periodic_delta(double delta, double period) {
     return delta - period * std::round(delta / period);
 }
 
+// ─────────────────────── auto grid sizing ────────────────────────────────
+// Computes per-dimension grid counts from sigma_min: N_i = ceil(range_i / (2*sigma_min_i))
+// with a floor of 72.  When sigma_min is not available, falls back to fallback_pts.
+
+std::vector<int> auto_grid_sizes(const Meta &meta, int fallback_pts) {
+    int dim = meta.dim;
+    std::vector<int> sizes(dim);
+    if ((int)meta.sigma_min.size() == dim) {
+        for (int d = 0; d < dim; d++) {
+            double range_d = meta.domMax[d] - meta.domMin[d];
+            double spacing = 2.0 * meta.sigma_min[d];
+            int autoN = (int)std::ceil(range_d / spacing);
+            sizes[d] = std::max(autoN, 72);
+        }
+    } else {
+        // No sigma_min in file; use fallback
+        sizes.assign(dim, std::max(fallback_pts, 72));
+    }
+    return sizes;
+}
+
 // ─────────────────────── CZAR gradient evaluation ──────────────────────────
 
 void czar_on_grid(
     const Meta &meta,
     const std::vector<Kernel> &kernels,
-    int grid_pts,
+    const std::vector<int> &grid_sizes,
     double nsigma,
     // outputs (pre-allocated):
     std::vector<double> &ptilde,         // [gridTotal]
@@ -181,7 +206,7 @@ void czar_on_grid(
     bool verbose)
 {
     const int dim = meta.dim;
-    sizes.assign(dim, grid_pts);
+    sizes = grid_sizes;
     gmin = meta.domMin;
     gmax = meta.domMax;
     dx.resize(dim);
@@ -909,12 +934,20 @@ void process_batch(const std::string &scan_dir,
                (int)kernels.size(), meta.dim);
         fflush(stdout);
 
+        // Resolve grid sizes: auto from sigma_min when grid_pts == 0
+        std::vector<int> grid_sizes;
+        if (grid_pts == 0) {
+            grid_sizes = auto_grid_sizes(meta, 100);
+        } else {
+            grid_sizes.assign(meta.dim, grid_pts);
+        }
+
         // Evaluate CZAR gradient
         std::vector<double> ptilde, czar_grad;
         std::vector<int> sizes;
         std::vector<double> gmin, gmax, dx;
         std::vector<bool> allowed;
-        czar_on_grid(meta, kernels, grid_pts, nsigma,
+        czar_on_grid(meta, kernels, grid_sizes, nsigma,
                      ptilde, czar_grad, sizes, gmin, gmax, dx, allowed, minpop, verbose);
 
         // Integrate: trapezoidal for 1D, MC for 2D+
@@ -954,7 +987,7 @@ static void print_help(const char *prog) {
     printf("  -h <height>     Initial hill height                      [0.01]\n");
     printf("  -f <factor>     Hill reduction factor                    [0.5]\n");
     printf("  -t <kT>         Override kT from file (kJ/mol)\n");
-    printf("  -g <pts>        Grid points per dimension                [100]\n");
+    printf("  -g <pts>        Grid points per dimension (0 = auto from sigma_min) [0]\n");
     printf("  -s <nsigma>     Kernel cutoff in sigma units             [4.0]\n");
     printf("  -m <minpop>     Min density fraction for allowed region  [1e-3]\n");
     printf("  -d <dir>        Directory to scan (default: current)     [.]\n");
@@ -976,7 +1009,7 @@ static void print_help(const char *prog) {
 
 int main(int argc, char *argv[]) {
     // Defaults
-    int grid_pts = 100;
+    int grid_pts = 0;
     double nsigma = 4.0;
     unsigned int mc_steps = 0;
     double mc_hill = 0.01;
@@ -1046,14 +1079,32 @@ int main(int argc, char *argv[]) {
         } else {
             printf("  sigma0: not found in file (old format); KDE normalization disabled\n");
         }
+        if ((int)meta.sigma_min.size() == meta.dim) {
+            printf("  sigma_min: ");
+            for (int d = 0; d < meta.dim; d++) printf("%s%.6f", d?",":"", meta.sigma_min[d]);
+            printf("\n");
+        }
+
+        // Resolve grid sizes: auto from sigma_min when grid_pts == 0
+        std::vector<int> grid_sizes;
+        if (grid_pts == 0) {
+            grid_sizes = auto_grid_sizes(meta, 100);
+            printf("  Grid auto-sized from sigma_min: (");
+            for (int d = 0; d < meta.dim; d++) printf("%s%d", d?",":" ", grid_sizes[d]);
+            printf(")\n");
+        } else {
+            grid_sizes.assign(meta.dim, grid_pts);
+        }
 
         std::vector<double> ptilde, czar_grad;
         std::vector<int> sizes;
         std::vector<double> gmin, gmax, dx;
         std::vector<bool> allowed;
 
-        printf("Evaluating CZAR gradient on %d^%d grid ...\n", grid_pts, meta.dim);
-        czar_on_grid(meta, kernels, grid_pts, nsigma,
+        printf("Evaluating CZAR gradient on ");
+        for (int d = 0; d < meta.dim; d++) printf("%s%d", d?"x":"", grid_sizes[d]);
+        printf(" grid ...\n");
+        czar_on_grid(meta, kernels, grid_sizes, nsigma,
                      ptilde, czar_grad, sizes, gmin, gmax, dx, allowed, minpop, verbose);
 
         std::vector<double> A;

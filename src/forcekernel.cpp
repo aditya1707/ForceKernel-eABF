@@ -118,6 +118,9 @@ private:
   unsigned fullRebuildInterval_;  // FULL rebuilds every N GRIDPACE events (for floating-point hygiene)
   unsigned gridRebuildCount_;     // count GRIDPACE events since last full rebuild
   bool lastRebuildWasFull_;       // diagnostic: was the last grid update a full rebuild?
+  bool hadDriftData_;             // diagnostic: was drift data computed at last full rebuild?
+  double maxDevZ_, maxDevF_;      // diagnostic: max FP drift at last full rebuild
+  unsigned nDirtyLastRebuild_;    // diagnostic: number of dirty entries at last rebuild
 
   // --- neighbor list (for lambda-kernels only) ---
   bool nlist_;
@@ -1026,7 +1029,10 @@ private:
       log.printf(" Z0_density=%.2f", Z0_density_);
     log.printf(" sigma=(%.4f", sig[0]);
     for (unsigned i = 1; i < dim_; ++i) log.printf(",%.4f", sig[i]);
-    log.printf(")\n");
+    log.printf(")");
+    if (lastRebuildWasFull_ && hadDriftData_)
+      log.printf(" FP_drift(Z=%.2e,F=%.2e)", maxDevZ_, maxDevF_);
+    log.printf("\n");
   }
 
   // Shared interpolation cell computation. Writes lo/frac into member work arrays.
@@ -1255,6 +1261,11 @@ private:
     std::fprintf(f, "sigma0");
     for (unsigned i = 0; i < dim_; ++i) std::fprintf(f, " %.15g", sigma0_[i]);
     std::fprintf(f, "\n");
+    if (hasMin_) {
+      std::fprintf(f, "sigma_min");
+      for (unsigned i = 0; i < dim_; ++i) std::fprintf(f, " %.15g", sigmaMin_[i]);
+      std::fprintf(f, "\n");
+    }
     std::fprintf(f, "nkernels %u\n", nZKernels_);
     std::fprintf(f, "#\n");
     std::fprintf(f, "# COLUMNS: Nk");
@@ -1639,7 +1650,10 @@ public:
              "for unphysically large force estimates.");
 
     // Grid
-    keys.add("compulsory", "GRIDSIZE","72",  "Grid points per dimension.");
+    keys.add("compulsory", "GRIDSIZE","0",
+             "Grid points per dimension. Default 0 = auto-size from SIGMA_MIN: "
+             "N = ceil(range / (2*SIGMA_MIN)), floor 72. When SIGMA_MIN is not set, "
+             "falls back to 72.");
     keys.add("compulsory", "GRIDPACE","500", "Reconstruct mean-force grid every GRIDPACE steps.");
     keys.add("optional",   "GRIDMIN",        "Lower grid bound(s) for non-periodic CVs.");
     keys.add("optional",   "GRIDMAX",        "Upper grid bound(s) for non-periodic CVs.");
@@ -1829,9 +1843,10 @@ public:
     if (muxClamp_ <= 0.0) error("MUXCLAMP must be > 0.");
     if (maxForce_ <= 0.0) error("MAXFORCE must be > 0.");
 
-    unsigned gridSize = 72;
+    unsigned gridSize = 0;
     parse("GRIDSIZE", gridSize); parse("GRIDPACE", gridPace_);
-    if (gridSize < 2) error("GRIDSIZE must be >= 2.");
+    bool gridSizeAuto = (gridSize == 0);
+    if (!gridSizeAuto && gridSize < 2) error("GRIDSIZE must be >= 2 (or 0 for auto).");
 
     bool noNlist = false;
     parseFlag("NONLIST", noNlist);
@@ -1886,7 +1901,46 @@ public:
       }
     }
 
-    gridN_.assign(dim_, gridSize);
+    // ── Auto-size grid from SIGMA_MIN ──────────────────────────────────────
+    // When GRIDSIZE=0 (default), compute per-dimension grid counts so that
+    // the grid spacing ≈ 2·SIGMA_MIN (the effective kernel diameter).
+    // This ensures the multilinear interpolation of the NW regression
+    // faithfully represents the smooth kernel field at its finest scale.
+    // Falls back to 72 when SIGMA_MIN is not set.
+    gridN_.resize(dim_);
+    if (gridSizeAuto) {
+      if (hasMin_) {
+        for (unsigned i = 0; i < dim_; ++i) {
+          double range_i = periodic_[i] ? domLen_[i] : (gridMax_[i] - gridMin_[i]);
+          double spacing = 2.0 * sigmaMin_[i];
+          unsigned autoN = (unsigned)std::ceil(range_i / spacing);
+          gridN_[i] = std::max(autoN, 72u);  // floor at 72
+        }
+        log.printf("  [FKERNELABF] GRIDSIZE=auto (from SIGMA_MIN): (");
+        for (unsigned i = 0; i < dim_; ++i) log.printf("%s%u", i?",":"", gridN_[i]);
+        log.printf(")\n");
+      } else {
+        gridN_.assign(dim_, 72u);
+        log.printf("  [FKERNELABF] GRIDSIZE=auto, no SIGMA_MIN set: using default 72\n");
+      }
+    } else {
+      gridN_.assign(dim_, gridSize);
+      // Warn if user-specified grid is coarser than sigma_min
+      if (hasMin_) {
+        for (unsigned i = 0; i < dim_; ++i) {
+          double range_i = periodic_[i] ? domLen_[i] : (gridMax_[i] - gridMin_[i]);
+          double dx_i = periodic_[i] ? range_i/(double)gridSize
+                                     : range_i/(double)(gridSize-1);
+          if (dx_i > 2.0 * sigmaMin_[i]) {
+            log.printf("  [FKERNELABF] WARNING: grid spacing %.4f for CV %u exceeds "
+                       "2*SIGMA_MIN=%.4f. The NW interpolation may not resolve the "
+                       "kernel field. Consider GRIDSIZE=0 (auto) or a finer grid.\n",
+                       dx_i, i, 2.0*sigmaMin_[i]);
+          }
+        }
+      }
+    }
+
     gridDx_.resize(dim_);
     gridTotal_ = 1;
     for (unsigned d = 0; d < dim_; ++d) {
@@ -2040,6 +2094,12 @@ public:
     // After reading, the mean-force grid is reconstructed immediately.
     if (getRestart()) {
       readState();
+      // Clear the zero-initialized grid arrays so the first full rebuild
+      // knows there is no prior incremental state to compare against.
+      // Without this, the drift diagnostic would report |rebuilt - zeros|
+      // which is just the grid magnitude, not actual FP drift.
+      nwNumerator_.clear();
+      nwDenominator_.clear();
       // Force immediate mean-force grid reconstruction from restored kernels
       if (nKernels_ > 0) reconstructBiasGrid();
     }
