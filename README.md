@@ -52,7 +52,11 @@ fk: FKERNELABF ...
 PRINT FILE=COLVAR STRIDE=500 ARG=*
 ```
 
-Alternatively, it is possible for FK-eABF to set its own options, where an adaptive sigma is determined based on 10xPACE (or set with 'ADAPTIVE_SIGMA_STRIDE'), and the default data aquisition (PACE) and force-field update frequency (GRIDPACE) are often sufficient for learning the gradient in classical simulations. However, it is still paramount to set a lower bound for the bandwidth via `SIGMA_MIN` to prevent the kernel population from growing unnecessarily as the Silverman bandwidth contracts. Practitioners familiar with metadynamics or eABF can use their usual settings as a guide: because `SIGMA` defines the kernel radius rather than a full bin width, the appropriate value is roughly half the bin width one would use for eABF. For example, a bin width of 0.1 Å corresponds to a `SIGMA_MIN` of approximately 0.05 Å.
+Several parameters in the example above can be set automatically, but should be treated as effectively mandatory in practice. Getting these right is the difference between a simulation that converges efficiently and one that wastes compute time.
+
+**SIGMA and SIGMA_MIN.** `SIGMA` sets the initial kernel bandwidth and can be omitted for automatic detection from CV fluctuations during a short unbiased warmup. `SIGMA_MIN` sets the floor below which the adaptive Silverman bandwidth will never shrink. While technically optional, omitting `SIGMA_MIN` allows the kernel population to grow without bound as the bandwidth contracts, wasting memory and slowing the kernel search. Practitioners familiar with metadynamics or eABF can use their usual settings as a guide: `SIGMA` should be set to approximately the bin width one would use for eABF, and `SIGMA_MIN` to half that value. For example, a dihedral CV with 5° bins (0.087 rad) corresponds to `SIGMA` ≈ 0.087 rad and `SIGMA_MIN` ≈ 0.04 rad. A distance CV for drug permeation with 0.2 Å bins corresponds to `SIGMA` ≈ 0.2 Å and `SIGMA_MIN` ≈ 0.1 Å.
+
+**GRIDSIZE.** The mean-force grid is where the NW regression is evaluated and then multilinearly interpolated between GRIDPACE rebuilds. The grid resolution does not affect the kernel accumulation or the free energy itself, but it directly controls how faithfully the cancellation force is applied to the fictitious particle between grid updates. If the grid is too coarse relative to the kernel bandwidth, the interpolated force is a poor approximation of the smooth kernel field, and the biasing force is applied inefficiently. By default (`GRIDSIZE=0`), FK-eABF auto-sizes the grid from `SIGMA_MIN` so that the grid spacing equals twice the minimum bandwidth (the effective kernel diameter), with a floor of 72 points per dimension. For a dihedral angle (range 2π, `SIGMA_MIN` = 0.04 rad), the auto-sized grid is 79 points. For a permeation distance (range 80 Å, `SIGMA_MIN` = 0.1 Å), the auto-sized grid is 400 points, consistent with the 0.2 Å bin spacing commonly adopted in ABF. If `SIGMA_MIN` is not set, the grid defaults to 72 points. If the user explicitly sets `GRIDSIZE` to a value that would produce spacing coarser than `2 × SIGMA_MIN`, a warning is printed to the PLUMED log but the simulation proceeds normally.
 
 #### Compulsory Keywords
 
@@ -70,14 +74,14 @@ Alternatively, it is possible for FK-eABF to set its own options, where an adapt
 | `EXPLORSCALE` | `1.0` | Exploration scaling factor if `BIASFACTOR > 1`. `1.0` = full exploration biasing force. `< 1.0` = reduced application of force on the CV from the density-based bias, setting it `= 0` disables the density-based boost. This is an option to reduce the additional force on CVs that are more auxillary, and do not drive the transition, for example setting `= 1.0, 0.0` for a two CV system disables the boost on the second CV. |
 | `MUXCLAMP` | `500.0` | Per-kernel mean-force clamp (kJ/mol/unit). Individual kernel μ values are hard-clamped to ±MUXCLAMP on absorption. Safety net for sparse regions. |
 | `MAXFORCE` | `500.0` | Grid mean-force clamp (kJ/mol/unit). The NW mean force on the grid is clamped per-node before interpolation. Safety net for unphysical force estimates. |
-| `GRIDSIZE` | `72` | Grid points per dimension for the frozen mean-force grid. |
+| `GRIDSIZE` | `0` (auto) | Grid points per dimension for the frozen mean-force grid. Default `0` = auto-size from `SIGMA_MIN`: N = ceil(range / (2 × SIGMA_MIN)), with a floor of 72. Defaults to 72 when `SIGMA_MIN` is not set. Warns if user-specified size produces spacing coarser than 2 × SIGMA_MIN. |
 | `GRIDPACE` | `500` | Rebuild the mean-force grid from λ-kernels every GRIDPACE steps. Between rebuilds, bias forces are interpolated from the frozen grid. This is a safe choice for classical simulations but should be reduced for AIMD. |
 
 #### Optional Keywords — Bandwidth
 
 | Keyword | Default | Description |
 |---------|---------|-------------|
-| `SIGMA` | *(auto)* | Initial kernel bandwidth σ₀, effectively, the radius of the kernel. For Metadynamics users: setting this to half the Gaussian width one would set for Metadynamics is a safe choice. For ABF users, setting this to 2x the typical bin width is fine, where your kernels would be 4 times larger than the typical ABF bin. One value, one per CV, or **omit entirely** for adaptive mode (measures CV variance during an unbiased warmup). |
+| `SIGMA` | *(auto)* | Initial kernel bandwidth σ₀. For eABF users, setting this to the typical bin width is a safe starting point. One value, one per CV, or **omit entirely** for adaptive mode (measures CV variance during an unbiased warmup). |
 | `SIGMA_MIN` | *(none)* | Minimum bandwidth floor. Silverman rescaling and per-kernel variance will never shrink σ below this value. Set at least 2x lower than SIGMA so the resolution of the free energy is enhanced with more sampling. One value or one per CV. |
 | `ADAPTIVE_SIGMA_STRIDE` | `10 × PACE` | Number of unbiased warmup steps for automatic σ₀ determination (Welford online variance). Only used when `SIGMA` is omitted. During warmup: zero bias, no kernel deposition, λ tracks z. |
 | `FIXED_SIGMA` | `false` | Flag. If set, disables Silverman bandwidth rescaling — all kernels use σ₀ permanently. |
@@ -147,7 +151,7 @@ czar_integrate only requires one argument: the directory for depositing the PMFs
 
 For 1D systems, integration uses the trapezoidal rule. For 2D and higher, integration uses a metadynamics-style MC random walk (same conventions as `abf_integrate`).
 
-The CZAR kernel files written by FK-eABF include a `sigma0` header that enables proper KDE normalization (α_k = ∏ σ₀/σ_k) for variable-bandwidth kernels.
+The CZAR kernel files written by FK-eABF include `sigma0` and `sigma_min` headers that enable proper KDE normalization (α_k = ∏ σ₀/σ_k) for variable-bandwidth kernels and automatic grid sizing in `czar_integrate`.
 
 #### Options
 
@@ -157,7 +161,7 @@ The CZAR kernel files written by FK-eABF include a `sigma0` header that enables 
 | `-h` | `<height>` | `0.01` | Initial hill height for the MC bias potential. |
 | `-f` | `<factor>` | `0.5` | Hill reduction factor. Hill is multiplied by this at regular intervals after a warmup period. |
 | `-t` | `<kT>` | *(from file)* | Override kT from the kernel file header (kJ/mol). |
-| `-g` | `<pts>` | `100` | Grid points per dimension for the integration grid. |
+| `-g` | `<pts>` | `0` (auto) | Grid points per dimension for the integration grid. Default `0` = auto-size from `sigma_min` in the kernel file header, defaulting to 100 if not present. |
 | `-s` | `<nsigma>` | `4.0` | Kernel cutoff in σ units. Kernels beyond this distance are skipped. |
 | `-m` | `<minpop>` | `1e-3` | Minimum density fraction for the allowed region. Grid points with density below `minpop × max(density)` are masked as NaN in the output. |
 | `-d` | `<dir>` | `.` | Directory to scan for kernel snapshot files (batch mode). |
