@@ -41,6 +41,9 @@ fk: FKERNELABF ...
     GRIDMAX=1.5           # CV domain upper bound
     SIGMA=0.05            # initial kernel width
     SIGMA_MIN=0.01        # minimum kernel width
+    GRIDSIZE=100
+
+    # Data Accumulation and Biasing Force Update options
     PACE=5                # steps between data accumulation
     GRIDPACE=1000         # steps bewteen biasing force updates
 
@@ -57,6 +60,8 @@ Several parameters in the example above can be set automatically, but should be 
 **SIGMA and SIGMA_MIN.** `SIGMA` sets the initial kernel bandwidth and can be omitted for automatic detection from CV fluctuations during a short unbiased warmup. `SIGMA_MIN` sets the floor below which the adaptive Silverman bandwidth will never shrink. While technically optional, omitting `SIGMA_MIN` allows the kernel population to grow without bound as the bandwidth contracts, wasting memory and slowing the kernel search. Practitioners familiar with metadynamics or eABF can use their usual settings as a guide: `SIGMA` should be set to approximately the bin width one would use for eABF, and `SIGMA_MIN` to half that value. For example, a dihedral CV with 5° bins (0.087 rad) corresponds to `SIGMA` ≈ 0.087 rad and `SIGMA_MIN` ≈ 0.04 rad. A distance CV for drug permeation with 0.2 Å bins corresponds to `SIGMA` ≈ 0.2 Å and `SIGMA_MIN` ≈ 0.1 Å.
 
 **GRIDSIZE.** The mean-force grid is where the NW regression is evaluated and then multilinearly interpolated between GRIDPACE rebuilds. The grid resolution does not affect the kernel accumulation or the free energy itself, but it directly controls how faithfully the cancellation force is applied to the fictitious particle between grid updates. If the grid is too coarse relative to the kernel bandwidth, the interpolated force is a poor approximation of the smooth kernel field, and the biasing force is applied inefficiently. By default (`GRIDSIZE=0`), FK-eABF auto-sizes the grid from `SIGMA_MIN` so that the grid spacing equals twice the minimum bandwidth (the effective kernel diameter), with a floor of 72 points per dimension. For a dihedral angle (range 2π, `SIGMA_MIN` = 0.04 rad), the auto-sized grid is 79 points. For a permeation distance (range 80 Å, `SIGMA_MIN` = 0.1 Å), the auto-sized grid is 400 points, consistent with the 0.2 Å bin spacing commonly adopted in ABF. If `SIGMA_MIN` is not set, the grid defaults to 72 points. If the user explicitly sets `GRIDSIZE` to a value that would produce spacing coarser than `2 × SIGMA_MIN`, a warning is printed to the PLUMED log but the simulation proceeds normally.
+
+**TLDR; set `SIGMA`, `SIGMA_MIN`, and `GRIDSIZE` (plus `GRIDMIN`/`GRIDMAX` for non-periodic CVs). Everything else can be left at its default.**
 
 #### Compulsory Keywords
 
