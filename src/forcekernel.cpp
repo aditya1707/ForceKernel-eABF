@@ -12,10 +12,14 @@
 #include <algorithm>
 #include <string>
 #include <sstream>
-#include <fstream>
 #include <iomanip>
 #include <random>
 #include <cstdio>
+#include <cerrno>
+#include <cstring>
+#if defined(__unix__) || defined(__APPLE__)
+  #include <unistd.h>  // for fsync() used in writeState() to guarantee on-disk durability
+#endif
 
 #ifndef M_PI
 #define M_PI 3.14159265358979323846
@@ -175,6 +179,14 @@ private:
   // The mean-force grid is fully rebuilt from kernels on RESTART.
   std::string stateFile_;
   unsigned stateStride_;
+  // Set true by readState(); cleared on the first calculate() post-restart after
+  // logging the real-CV location alongside the restored s_fict_ so users can
+  // confirm the MD frame and restart state are coherent.
+  bool postRestartLogPending_;
+  // If atomic rename (tmp -> state) has failed on this filesystem, skip the
+  // rename attempt on subsequent writes and go straight to direct-overwrite.
+  // Avoids spamming the log with warnings on quirky parallel filesystems.
+  bool stateRenameKnownBad_;
 
   // --- kernel diagnostics file ---
   // Appends one line per write to {label}.kernelinfo.dat.
@@ -1298,84 +1310,237 @@ private:
   //   - stable ID counters (nextKernelId, nextZKernelId)
   //   - Z0_density for exploration
   //   - RNG state for reproducible restart
-  void writeState() {
-    if (stateFile_.empty()) return;
-    // Write to a temporary file then atomically rename to avoid corruption
-    // if the process is killed mid-write.
-    std::string tmpFile = stateFile_ + ".tmp";
-    std::ofstream f(tmpFile.c_str());
-    if (!f.is_open()) {
-      log.printf("  [FKERNELABF] WARNING: could not open state file '%s' for writing.\n",
-                 tmpFile.c_str());
+
+  // ---- backup helper (called from readState after successful parse) ----
+  // Inspired by DRR (DynamicReferenceRestraining.cpp): on a successful
+  // load, copy the just-read state file to bck.{stateFile_}.{N} where N is
+  // the lowest non-existent integer suffix.  This preserves a known-good
+  // restart point in case the user resumes the run, hits a problem, and
+  // the next STATESTRIDE write clobbers the recoverable state.
+  //
+  // Uses C FILE* + fread/fwrite in 64KB chunks (no need to fully buffer the
+  // file in memory — state files for production runs can grow to tens of MB
+  // for high-M simulations like Abl1).  Failures are logged as NOTE (the
+  // load itself succeeded; an unbacked-up restart is still a working restart).
+  void backupStateFile(const std::string& srcPath) {
+    // Find the first available bck.{srcPath}.{N} name.  Cap N at a sane
+    // upper bound so a directory full of leftover backups can't hang us in
+    // an infinite stat loop.
+    constexpr int MAX_BACKUPS = 10000;
+    std::string dstPath;
+    int n = 0;
+    for (; n < MAX_BACKUPS; ++n) {
+      dstPath = "bck." + srcPath + "." + std::to_string(n);
+      // Use C-stdio probing rather than IFile::FileExist so we don't need
+      // to construct an IFile per probe.  fopen with "rb" returns null
+      // iff the file doesn't exist (or is unreadable, which is fine — we
+      // still want to skip past it).
+      FILE* probe = std::fopen(dstPath.c_str(), "rb");
+      if (!probe) break;
+      std::fclose(probe);
+    }
+    if (n == MAX_BACKUPS) {
+      log.printf("  [FKERNELABF] NOTE: %d backup state files already exist "
+                 "(bck.%s.0 .. bck.%s.%d). Skipping backup-on-load to avoid "
+                 "filename exhaustion. Consider archiving old backups.\n",
+                 MAX_BACKUPS, srcPath.c_str(), srcPath.c_str(), MAX_BACKUPS-1);
       return;
     }
-    f << std::setprecision(15);
 
-    f << "# FKERNELABF state file\n";
-    f << "# Written at step " << getStep() << "\n";
-    f << "#\n";
-
-    f << "dim " << dim_ << "\n";
-    f << "kT " << kT_ << "\n";
-    f << "s_fict";
-    for (unsigned i = 0; i < dim_; ++i) f << " " << s_fict_[i];
-    f << "\n";
-    f << "v_fict";
-    for (unsigned i = 0; i < dim_; ++i) f << " " << v_fict_[i];
-    f << "\n";
-    f << "sigma0";
-    for (unsigned i = 0; i < dim_; ++i) f << " " << sigma0_[i];
-    f << "\n";
-    f << "adaptive_done " << (adaptiveSigma_ ? 0 : 1) << "\n";
-    f << "Z0_density " << Z0_density_ << "\n";
-
-    f << "M " << nKernels_ << "\n";
-    f << "totalN " << totalN_ << "\n";
-    f << "sumNk2 " << sumNk2_ << "\n";
-    f << "nextKernelId " << nextKernelId_ << "\n";
-    f << "# lambda-kernels: Nk center[0..d-1] mu[0..d-1] sigma[0..d-1] id\n";
-    for (unsigned k = 0; k < nKernels_; ++k) {
-      f << "K " << kernels_[k].Nk;
-      for (unsigned i = 0; i < dim_; ++i) f << " " << kernels_[k].center[i];
-      for (unsigned i = 0; i < dim_; ++i) f << " " << kernels_[k].mu[i];
-      for (unsigned i = 0; i < dim_; ++i) f << " " << kernels_[k].sigma[i];
-      f << " " << kernels_[k].id;
-      f << "\n";
+    FILE* src = std::fopen(srcPath.c_str(), "rb");
+    if (!src) {
+      int e = errno;
+      log.printf("  [FKERNELABF] NOTE: backup-on-load: could not reopen "
+                 "'%s' for reading (errno=%d: %s). Skipping backup.\n",
+                 srcPath.c_str(), e, std::strerror(e));
+      return;
+    }
+    FILE* dst = std::fopen(dstPath.c_str(), "wb");
+    if (!dst) {
+      int e = errno;
+      std::fclose(src);
+      log.printf("  [FKERNELABF] NOTE: backup-on-load: could not create "
+                 "'%s' (errno=%d: %s). Skipping backup.\n",
+                 dstPath.c_str(), e, std::strerror(e));
+      return;
     }
 
-    f << "zM " << nZKernels_ << "\n";
-    f << "zTotalN " << zTotalN_ << "\n";
-    f << "zSumNk2 " << zSumNk2_ << "\n";
-    f << "nextZKernelId " << nextZKernelId_ << "\n";
-    f << "# z-kernels: Nk center[0..d-1] mu[0..d-1] sigma[0..d-1] id\n";
+    char buf[65536];
+    bool ok = true;
+    while (true) {
+      size_t r = std::fread(buf, 1, sizeof(buf), src);
+      if (r == 0) break;
+      size_t w = std::fwrite(buf, 1, r, dst);
+      if (w != r) { ok = false; break; }
+    }
+    if (ok && std::ferror(src)) ok = false;
+
+    std::fclose(dst);
+    std::fclose(src);
+
+    if (ok) {
+      log.printf("  [FKERNELABF]  Backup-on-load: '%s' -> '%s'\n",
+                 srcPath.c_str(), dstPath.c_str());
+    } else {
+      log.printf("  [FKERNELABF] NOTE: backup-on-load copy of '%s' to '%s' "
+                 "failed mid-stream. Removing partial backup.\n",
+                 srcPath.c_str(), dstPath.c_str());
+      std::remove(dstPath.c_str());
+    }
+  }
+
+  // ---- main state-write entry point -----------------------------------
+  // On-disk strategy: build the content in a std::string first, then
+  //   1. Try write-to-tmp + atomic rename (POSIX-safe, crash-resistant).
+  //   2. If rename fails (common on Lustre/GPFS/NFS with EBUSY/EIO under
+  //      metadata-server contention), fall back to direct overwrite of the
+  //      target path — less atomic, but still leaves a valid state file
+  //      on-disk after a successful write.
+  // After the first rename failure we remember it (stateRenameKnownBad_) and
+  // skip the rename attempt on subsequent writes so the log isn't flooded.
+  void writeState() {
+    if (stateFile_.empty()) return;
+
+    // Build the full state content in memory.  This lets us attempt the
+    // atomic-rename path and, on failure, fall back to direct overwrite
+    // without duplicating the serialization code.
+    std::ostringstream oss;
+    oss << std::setprecision(15);
+
+    oss << "# FKERNELABF state file\n";
+    oss << "# Written at step " << getStep() << "\n";
+    oss << "#\n";
+
+    oss << "dim " << dim_ << "\n";
+    oss << "kT " << kT_ << "\n";
+    oss << "s_fict";
+    for (unsigned i = 0; i < dim_; ++i) oss << " " << s_fict_[i];
+    oss << "\n";
+    oss << "v_fict";
+    for (unsigned i = 0; i < dim_; ++i) oss << " " << v_fict_[i];
+    oss << "\n";
+    oss << "sigma0";
+    for (unsigned i = 0; i < dim_; ++i) oss << " " << sigma0_[i];
+    oss << "\n";
+    oss << "adaptive_done " << (adaptiveSigma_ ? 0 : 1) << "\n";
+    oss << "Z0_density " << Z0_density_ << "\n";
+
+    oss << "M " << nKernels_ << "\n";
+    oss << "totalN " << totalN_ << "\n";
+    oss << "sumNk2 " << sumNk2_ << "\n";
+    oss << "nextKernelId " << nextKernelId_ << "\n";
+    oss << "# lambda-kernels: Nk center[0..d-1] mu[0..d-1] sigma[0..d-1] id\n";
+    for (unsigned k = 0; k < nKernels_; ++k) {
+      oss << "K " << kernels_[k].Nk;
+      for (unsigned i = 0; i < dim_; ++i) oss << " " << kernels_[k].center[i];
+      for (unsigned i = 0; i < dim_; ++i) oss << " " << kernels_[k].mu[i];
+      for (unsigned i = 0; i < dim_; ++i) oss << " " << kernels_[k].sigma[i];
+      oss << " " << kernels_[k].id;
+      oss << "\n";
+    }
+
+    oss << "zM " << nZKernels_ << "\n";
+    oss << "zTotalN " << zTotalN_ << "\n";
+    oss << "zSumNk2 " << zSumNk2_ << "\n";
+    oss << "nextZKernelId " << nextZKernelId_ << "\n";
+    oss << "# z-kernels: Nk center[0..d-1] mu[0..d-1] sigma[0..d-1] id\n";
     for (unsigned k = 0; k < nZKernels_; ++k) {
-      f << "Z " << zKernels_[k].Nk;
-      for (unsigned i = 0; i < dim_; ++i) f << " " << zKernels_[k].center[i];
-      for (unsigned i = 0; i < dim_; ++i) f << " " << zKernels_[k].mu[i];
-      for (unsigned i = 0; i < dim_; ++i) f << " " << zKernels_[k].sigma[i];
-      f << " " << zKernels_[k].id;
-      f << "\n";
+      oss << "Z " << zKernels_[k].Nk;
+      for (unsigned i = 0; i < dim_; ++i) oss << " " << zKernels_[k].center[i];
+      for (unsigned i = 0; i < dim_; ++i) oss << " " << zKernels_[k].mu[i];
+      for (unsigned i = 0; i < dim_; ++i) oss << " " << zKernels_[k].sigma[i];
+      oss << " " << zKernels_[k].id;
+      oss << "\n";
     }
 
     // RNG state for reproducible restart.
     // std::mt19937 supports << / >> for full internal state serialization.
-    f << "RNG " << rng_ << "\n";
+    oss << "RNG " << rng_ << "\n";
+    oss << "END\n";
 
-    f << "END\n";
+    const std::string content = oss.str();
 
-    f.flush();
-    if (!f.good()) {
-      log.printf("  [FKERNELABF] WARNING: I/O error writing state file '%s'.\n",
-                 tmpFile.c_str());
+    // Writes `content` to `path`, fsyncs, and closes.  Returns true on success.
+    // Uses C FILE* so we can fsync(fileno(fp)) before close — important on
+    // parallel filesystems where buffered data may not be durable until fsync.
+    //
+    // Error-path discipline: when fwrite/fflush fails we must still call
+    // fclose(fp) to release the handle, but fclose may itself succeed (errno
+    // unchanged or reset) or fail with a different errno than the original
+    // write error.  Snapshotting errno before fclose and restoring it after
+    // preserves the original diagnostic for the caller.
+    auto writeContentTo = [&](const std::string& path) -> bool {
+      FILE* fp = std::fopen(path.c_str(), "wb");
+      if (!fp) return false;
+      size_t n = std::fwrite(content.data(), 1, content.size(), fp);
+      if (n != content.size()) {
+        int e = errno; std::fclose(fp); errno = e; return false;
+      }
+      if (std::fflush(fp) != 0) {
+        int e = errno; std::fclose(fp); errno = e; return false;
+      }
+#if defined(__unix__) || defined(__APPLE__)
+      // Force on-disk durability before any subsequent rename.  Without this,
+      // a rename can race ahead of the data flush on some filesystems and the
+      // visible state file can end up empty if the job is killed at the wrong
+      // instant.  Best-effort: we ignore ENOTSUP / EINVAL from virtual FSes.
+      int fd = fileno(fp);
+      if (fd >= 0) (void)fsync(fd);
+#endif
+      return (std::fclose(fp) == 0);
+    };
+
+    const std::string tmpFile = stateFile_ + ".tmp";
+
+    // --- Path 1: atomic write-to-tmp + rename --------------------------------
+    // Only attempted while the filesystem hasn't already shown it can't do it.
+    if (!stateRenameKnownBad_) {
+      if (!writeContentTo(tmpFile)) {
+        int err = errno;
+        log.printf("  [FKERNELABF] WARNING: could not write tmp state file '%s' "
+                   "(errno=%d: %s).\n",
+                   tmpFile.c_str(), err, std::strerror(err));
+        // Don't set stateRenameKnownBad_ here — tmp-write failure is a
+        // different class of problem from rename failure and may be transient.
+      } else if (std::rename(tmpFile.c_str(), stateFile_.c_str()) == 0) {
+        log.printf("  [FKERNELABF] State written: %s  (M=%u, zM=%u, step %lld)\n",
+                   stateFile_.c_str(), nKernels_, nZKernels_, (long long)getStep());
+        return;
+      } else {
+        int err = errno;
+        // Rename failed.  Report errno the first time so users can diagnose
+        // (EBUSY/EIO on parallel FS, EXDEV across mounts, EACCES etc.), then
+        // switch permanently to direct-write mode to avoid log spam.
+        log.printf("  [FKERNELABF] NOTE: atomic rename of '%s' -> '%s' failed "
+                   "(errno=%d: %s). This is usually benign on parallel "
+                   "filesystems (Lustre/GPFS/NFS). Switching to direct-write "
+                   "mode for all subsequent state writes this run.\n",
+                   tmpFile.c_str(), stateFile_.c_str(),
+                   err, std::strerror(err));
+        stateRenameKnownBad_ = true;
+        // Fall through to direct-write below.  Leave the tmp file for the
+        // direct-write path to clean up on success.
+      }
+    }
+
+    // --- Path 2: direct overwrite of stateFile_ ------------------------------
+    // Not atomic — a crash mid-write could leave a truncated state file — but
+    // the next STATESTRIDE write will overwrite it, and even a truncated file
+    // is caught by the parse-validation checks in readState().
+    if (writeContentTo(stateFile_)) {
+      // Remove any stale tmp left over from the failed rename path.
+      std::remove(tmpFile.c_str());
+      log.printf("  [FKERNELABF] State written (direct): %s  "
+                 "(M=%u, zM=%u, step %lld)\n",
+                 stateFile_.c_str(), nKernels_, nZKernels_, (long long)getStep());
       return;
     }
-    f.close();
-    if (std::rename(tmpFile.c_str(), stateFile_.c_str()) != 0)
-      log.printf("  [FKERNELABF] WARNING: could not rename '%s' to '%s'.\n",
-                 tmpFile.c_str(), stateFile_.c_str());
-    else
-      log.printf("  [FKERNELABF] State written: %s  (M=%u, zM=%u, step %lld)\n",
-                 stateFile_.c_str(), nKernels_, nZKernels_, (long long)getStep());
+
+    int err = errno;
+    log.printf("  [FKERNELABF] WARNING: could not write state file '%s' "
+               "(direct-write fallback failed, errno=%d: %s). "
+               "State NOT updated this step; will retry at next STATESTRIDE.\n",
+               stateFile_.c_str(), err, std::strerror(err));
   }
 
   void readState() {
@@ -1387,15 +1552,35 @@ private:
       return;
     }
     f.open(stateFile_);
-    log.printf("  [FKERNELABF] Reading state from: %s\n", stateFile_.c_str());
+
+    // Opening banner — closing stanza (with population + grid stats) is at
+    // the end of this function and after the post-rebuild call in init().
+    log.printf("  [FKERNELABF] ============================================================\n");
+    log.printf("  [FKERNELABF]  RESTART: reading state from '%s'\n", stateFile_.c_str());
+    log.printf("  [FKERNELABF] ============================================================\n");
 
     // Clear existing kernel data
     kernels_.clear(); nKernels_ = 0; totalN_ = 0; sumNk2_ = 0;
     zKernels_.clear(); nZKernels_ = 0; zTotalN_ = 0; zSumNk2_ = 0;
 
+    // Diagnostics captured during parsing (for the closing banner).
+    long long fileStep = -1;       // from "# Written at step N" header
+    bool rngRestored = false;      // whether we parsed a RNG line
+
     std::string line;
     while (f.getline(line)) {
-      if (line.empty() || line[0] == '#') continue;
+      if (line.empty()) continue;
+      if (line[0] == '#') {
+        // Sniff the "# Written at step N" header for diagnostics.
+        // Format is exactly that string followed by a decimal integer.
+        const char* prefix = "# Written at step ";
+        const size_t plen = std::strlen(prefix);
+        if (line.compare(0, plen, prefix) == 0) {
+          std::istringstream hss(line.substr(plen));
+          hss >> fileStep;
+        }
+        continue;
+      }
 
       std::istringstream iss(line);
       std::string key;
@@ -1502,6 +1687,7 @@ private:
       } else if (key == "RNG") {
         // Restore full mt19937 state for reproducible restart.
         iss >> rng_;
+        rngRestored = true;
       } else if (key == "END") {
         break;
       }
@@ -1583,13 +1769,87 @@ private:
     sigDirty_ = true;
     zSigDirty_ = true;
 
-    log.printf("  [FKERNELABF] State restored: M=%u totalN=%.0f zM=%u zTotalN=%.0f "
-               "Z0=%.2f sigma0=(%.5f",
-               nKernels_, totalN_, nZKernels_, zTotalN_, Z0_density_, sigma0_[0]);
-    for (unsigned i = 1; i < dim_; ++i) log.printf(",%.5f", sigma0_[i]);
-    log.printf(") s_fict=(%.5f", s_fict_[0]);
-    for (unsigned i = 1; i < dim_; ++i) log.printf(",%.5f", s_fict_[i]);
+    // Arm the first-post-restart log in calculate() so users see the real CV
+    // position alongside the restored s_fict on the first MD step.
+    postRestartLogPending_ = true;
+
+    // ── Closing banner: what was read, and whether everything looks sane ──
+    // Compute lambda-kernel Nk distribution (mean + min/max) for a quick
+    // sanity check on population health.
+    double nkMin = 0.0, nkMax = 0.0, nkMean = 0.0;
+    if (nKernels_ > 0) {
+      nkMin = nkMax = kernels_[0].Nk;
+      for (unsigned k = 0; k < nKernels_; ++k) {
+        nkMin = std::min(nkMin, kernels_[k].Nk);
+        nkMax = std::max(nkMax, kernels_[k].Nk);
+      }
+      nkMean = totalN_ / (double)nKernels_;
+    }
+    double zNkMin = 0.0, zNkMax = 0.0, zNkMean = 0.0;
+    if (nZKernels_ > 0) {
+      zNkMin = zNkMax = zKernels_[0].Nk;
+      for (unsigned k = 0; k < nZKernels_; ++k) {
+        zNkMin = std::min(zNkMin, zKernels_[k].Nk);
+        zNkMax = std::max(zNkMax, zKernels_[k].Nk);
+      }
+      zNkMean = zTotalN_ / (double)nZKernels_;
+    }
+
+    log.printf("  [FKERNELABF]  Restored state summary:\n");
+    if (fileStep >= 0)
+      log.printf("  [FKERNELABF]    file step    : %lld\n", fileStep);
+    else
+      log.printf("  [FKERNELABF]    file step    : (not recorded in header)\n");
+    log.printf("  [FKERNELABF]    dim          : %u   kT=%.4f\n", dim_, kT_);
+
+    // Extended system (fictitious particle) — the key dynamical state.
+    log.printf("  [FKERNELABF]    s_fict       : (%.6f", s_fict_[0]);
+    for (unsigned i = 1; i < dim_; ++i) log.printf(", %.6f", s_fict_[i]);
     log.printf(")\n");
+    log.printf("  [FKERNELABF]    v_fict       : (%.6e", v_fict_[0]);
+    for (unsigned i = 1; i < dim_; ++i) log.printf(", %.6e", v_fict_[i]);
+    log.printf(")\n");
+
+    // Bandwidth / adaptive state.
+    log.printf("  [FKERNELABF]    sigma0       : (%.6f", sigma0_[0]);
+    for (unsigned i = 1; i < dim_; ++i) log.printf(", %.6f", sigma0_[i]);
+    log.printf(")  [adaptive %s]\n",
+               adaptiveSigma_ ? "NOT complete — warmup will restart"
+                              : "warmup complete");
+
+    // Lambda-kernel population.
+    log.printf("  [FKERNELABF]    lambda pop   : M=%u  totalN=%.0f  sumNk2=%.3g  "
+               "nextId=%llu\n",
+               nKernels_, totalN_, sumNk2_, (unsigned long long)nextKernelId_);
+    if (nKernels_ > 0)
+      log.printf("  [FKERNELABF]                   Nk: min=%.2f  max=%.2f  mean=%.2f\n",
+                 nkMin, nkMax, nkMean);
+
+    // z-kernel (CZAR) population.
+    log.printf("  [FKERNELABF]    z-kernel pop : zM=%u  zTotalN=%.0f  zSumNk2=%.3g  "
+               "nextId=%llu\n",
+               nZKernels_, zTotalN_, zSumNk2_, (unsigned long long)nextZKernelId_);
+    if (nZKernels_ > 0)
+      log.printf("  [FKERNELABF]                   Nk: min=%.2f  max=%.2f  mean=%.2f\n",
+                 zNkMin, zNkMax, zNkMean);
+
+    // Exploration state and RNG.
+    log.printf("  [FKERNELABF]    Z0_density   : %.4f%s\n", Z0_density_,
+               (biasFactor_ > 1.0) ? ""
+                                   : "  (unused: BIASFACTOR=1, pure ABF)");
+    log.printf("  [FKERNELABF]    RNG          : %s\n",
+               rngRestored ? "restored from state file"
+                           : "NOT in state file — using seeded RNG");
+    log.printf("  [FKERNELABF]  Mean-force grid will be rebuilt from restored "
+               "kernels next.\n");
+    log.printf("  [FKERNELABF] ============================================================\n");
+
+    // DRR-style backup-on-load: now that the parse has fully succeeded
+    // (we'd have called error() and aborted otherwise), preserve the
+    // just-read state file as bck.{stateFile_}.{N}.  Protects against a
+    // restart that the user later regrets — the next STATESTRIDE write
+    // will overwrite stateFile_ in place, but the backup remains.
+    backupStateFile(stateFile_);
   }
 
 public:
@@ -1721,6 +1981,8 @@ public:
       kernelStride_(0),
       czarStride_(0),
       stateStride_(0),
+      postRestartLogPending_(false),
+      stateRenameKnownBad_(false),
       kernelInfoStride_(0),
       kernelInfoFileOpen_(false),
       sigDirty_(true), zSigDirty_(true),
@@ -2100,14 +2362,96 @@ public:
       // which is just the grid magnitude, not actual FP drift.
       nwNumerator_.clear();
       nwDenominator_.clear();
-      // Force immediate mean-force grid reconstruction from restored kernels
-      if (nKernels_ > 0) reconstructBiasGrid();
+      // Force immediate mean-force grid reconstruction from restored kernels.
+      // Follow up with a grid-statistics dump so users can see the full
+      // rebuild produced a populated, finite-magnitude mean-force field.
+      if (nKernels_ > 0) {
+        reconstructBiasGrid();
+
+        // --- post-rebuild grid diagnostics ---------------------------------
+        // Confirms the kernels actually splatted onto the grid: fraction of
+        // nodes with non-zero NW denominator, range of Z, and per-dim range
+        // of the mean force.  If nonzero-fraction is near 0, something is
+        // wrong with the domain/grid config vs. the restored kernel centers.
+        unsigned nonzero = 0;
+        double zMax = 0.0, zSum = 0.0;
+        for (unsigned g = 0; g < gridTotal_; ++g) {
+          if (nwDenominator_[g] > 1e-300) {
+            ++nonzero;
+            zSum += nwDenominator_[g];
+            if (nwDenominator_[g] > zMax) zMax = nwDenominator_[g];
+          }
+        }
+        double zMean = (nonzero > 0) ? zSum / nonzero : 0.0;
+        double fracNonzero = (gridTotal_ > 0)
+            ? 100.0 * (double)nonzero / (double)gridTotal_
+            : 0.0;
+
+        std::vector<double> fMaxAbs(dim_, 0.0);
+        for (unsigned g = 0; g < gridTotal_; ++g) {
+          for (unsigned d = 0; d < dim_; ++d) {
+            double v = std::abs(meanForceGrid_[g*dim_ + d]);
+            if (v > fMaxAbs[d]) fMaxAbs[d] = v;
+          }
+        }
+
+        log.printf("  [FKERNELABF] ============================================================\n");
+        log.printf("  [FKERNELABF]  RESTART: full mean-force grid rebuild complete\n");
+        log.printf("  [FKERNELABF]    grid nodes   : %u total (dims:", gridTotal_);
+        for (unsigned i = 0; i < dim_; ++i)
+          log.printf(" %u", gridN_[i]);
+        log.printf(")\n");
+        log.printf("  [FKERNELABF]    populated    : %u (%.1f%%) with Z > 0\n",
+                   nonzero, fracNonzero);
+        log.printf("  [FKERNELABF]    Z (density)  : max=%.4g  mean(populated)=%.4g\n",
+                   zMax, zMean);
+        log.printf("  [FKERNELABF]    |F_abf| max  : (%.4g", fMaxAbs[0]);
+        for (unsigned i = 1; i < dim_; ++i) log.printf(", %.4g", fMaxAbs[i]);
+        log.printf(")  [clamp MAXFORCE=%.0f]\n", maxForce_);
+        if (nonzero == 0) {
+          log.printf("  [FKERNELABF]  WARNING: grid has zero populated nodes after "
+                     "rebuild. Check that the restored kernel centers lie inside "
+                     "the grid domain [GRID_MIN, GRID_MAX].\n");
+        } else if (fracNonzero < 1.0) {
+          log.printf("  [FKERNELABF]  NOTE: very sparse grid population (%.2f%%). "
+                     "Likely OK for early restarts with few kernels, but verify "
+                     "the domain covers the sampled region.\n", fracNonzero);
+        }
+        log.printf("  [FKERNELABF] ============================================================\n");
+      } else {
+        log.printf("  [FKERNELABF]  RESTART: no lambda-kernels in state file — "
+                   "grid will populate as sampling resumes.\n");
+        log.printf("  [FKERNELABF] ============================================================\n");
+      }
     }
   }
 
   void calculate() override {
     double dt = getTimeStep();
     for (unsigned i = 0; i < dim_; ++i) work_cv_[i] = getArgument(i);
+
+    // First-post-restart diagnostic: the CV z is only available here (not in
+    // init()), so this is where we can confirm the MD frame is coherent with
+    // the restored extended-system state. A large |z - s_fict| at this point
+    // usually means the restart picked up the wrong trajectory checkpoint or
+    // the extended-system KAPPA is very soft; print both so users can judge.
+    if (postRestartLogPending_) {
+      log.printf("  [FKERNELABF]  First post-restart step (step %lld):\n",
+                 (long long)getStep());
+      log.printf("  [FKERNELABF]    CV z (from MD): (%.6f", work_cv_[0]);
+      for (unsigned i = 1; i < dim_; ++i) log.printf(", %.6f", work_cv_[i]);
+      log.printf(")\n");
+      log.printf("  [FKERNELABF]    s_fict (restored): (%.6f", s_fict_[0]);
+      for (unsigned i = 1; i < dim_; ++i) log.printf(", %.6f", s_fict_[i]);
+      log.printf(")\n");
+      log.printf("  [FKERNELABF]    |z - s_fict| per CV: (");
+      for (unsigned i = 0; i < dim_; ++i) {
+        double d = std::abs(periodicDelta(i, s_fict_[i], work_cv_[i]));
+        log.printf("%s%.4e", i?", ":"", d);
+      }
+      log.printf(")\n");
+      postRestartLogPending_ = false;
+    }
 
     if (firstStep_) {
       for (unsigned i = 0; i < dim_; ++i) {
@@ -2319,8 +2663,18 @@ public:
     if (!czarFile_.empty() && czarStride_ > 0 && nZKernels_ > 0 && getStep() % czarStride_ == 0)
       writeCZARFile();
 
-    // (L) Restart state (overwritten in place, no backups)
-    if (stateStride_ > 0 && nKernels_ > 0 && getStep() % stateStride_ == 0)
+    // (L) Restart state (overwritten in place; on rename-fail, direct write).
+    // Trigger sources (OR-combined):
+    //   - STATESTRIDE: regular cadence on simulated step number
+    //   - getCPT():    MD engine is writing its own checkpoint this step
+    //     (GROMACS .cpt, etc.).  Saving FK-eABF state synchronously with the
+    //     engine checkpoint keeps the PLUMED restart and the MD trajectory
+    //     checkpoint coherent — without this, restarts can pick up a state
+    //     file from a slightly earlier step than the trajectory frame, and
+    //     the first-post-restart |z - s_fict| diagnostic will flag it.
+    //     Inspired by DRR (DynamicReferenceRestraining.cpp) and OPES.
+    if (nKernels_ > 0 &&
+        ((stateStride_ > 0 && getStep() % stateStride_ == 0) || getCPT()))
       writeState();
 
     // (M) Kernel diagnostics file (appending time series)
