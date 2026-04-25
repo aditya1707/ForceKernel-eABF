@@ -68,27 +68,20 @@ flowchart TD
     CVP --> Sigma{Know a sensible<br/>bin width<br/>from prior eABF<br/>or metadynamics?}
     CVN --> Sigma
 
-    Sigma -->|Yes| SS[SIGMA = bin width<br/>SIGMA_MIN ≈ SIGMA / 2<br/>GRIDSIZE = 0 auto]
+    Sigma -->|Yes| SS[SIGMA = bin width<br/>SIGMA_MIN ≈ SIGMA / 2]
     Sigma -->|No| SA[Omit SIGMA<br/>adaptive warmup auto-detects σ₀<br/>still set SIGMA_MIN]
 
     SS --> Kappa["KAPPA: pick so coupling width<br/>√(kT/κ) is much smaller than SIGMA_MIN<br/>typical 1000–5000 kJ/mol/unit²"]
     SA --> Kappa
 
     Kappa --> Engine{Classical MD<br/>or AIMD?}
-    Engine -->|Classical| MD[GRIDPACE 500–1000<br/>default usually fine]
-    Engine -->|AIMD| AIMD[Reduce GRIDPACE to ~50–200<br/>kernels accrue slowly per step]
+    Engine -->|Classical| MD[GRIDPACE 500–1000]
+    Engine -->|AIMD| AIMD[PACE = 1<br/>GRIDPACE 50–200]
 
-    MD --> Explore{Rough or<br/>multi-basin FES<br/>that needs extra<br/>exploration drive?}
-    AIMD --> Explore
+    MD --> BiasFactor[BIASFACTOR &gt; 1<br/>typically 2–10]
+    AIMD --> BiasFactor
 
-    Explore -->|No| Pure[BIASFACTOR = 1.0<br/>pure ABF]
-    Explore -->|Yes| Multi{Multi-CV system<br/>with auxiliary CVs<br/>that should not be<br/>driven by exploration?}
-    Multi -->|No| AllEx[BIASFACTOR &gt; 1<br/>typically 2–10]
-    Multi -->|Yes| ScaleEx[BIASFACTOR &gt; 1<br/>EXPLORSCALE = 1, 0, ...<br/>exploration only on principal CVs]
-
-    Pure --> Out[CZARSTRIDE: ~10 dumps over the run<br/>STATESTRIDE: leave at default<br/>KERNELINFOSTRIDE = your PRINT STRIDE]
-    AllEx --> Out
-    ScaleEx --> Out
+    BiasFactor --> Out[CZARSTRIDE: set as often as necessary<br/>KERNELINFOSTRIDE = your PRINT STRIDE]
 
     Out --> End([Run simulation])
 ```
