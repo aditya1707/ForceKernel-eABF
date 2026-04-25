@@ -1,0 +1,29 @@
+LOAD FILE=forcekernel.cpp
+
+WHOLEMOLECULES ENTITY0=5040-5078 
+phi: TORSION ATOMS=5056,5054,5052,5050
+psi: TORSION ATOMS=5056,5054,5070,5072
+
+# ---- Force-Kernel ABF (internal extended Lagrangian) ----
+fk: FKERNELABF ...
+
+    # Extended Lagrangian (fictitious particle dynamics)
+    ARG=phi,psi
+    KAPPA=3000.0,3000.0
+    TAU=0.5,0.5
+    FRICTION=8.0
+    TEMP=298.15
+
+    # Early-sampling boost (density-based)
+    SIGMA=0.15
+    SIGMA_MIN=0.05
+    PACE=5
+    GRIDPACE=1000
+    BIASFACTOR=8
+
+    # Output options
+    CZARSTRIDE=500000
+    KERNELINFOSTRIDE=500
+...
+
+PRINT STRIDE=500 ARG=* FILE=COLVAR
