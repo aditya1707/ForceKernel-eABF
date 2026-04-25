@@ -1,0 +1,34 @@
+LOAD FILE=forcekernel.cpp
+UNITS LENGTH=A ENERGY=kcal/mol
+
+# C-C bond and backbone distances
+d1: DISTANCE ATOMS=2,10   # C1 to C4 end-to-end
+d2: DISTANCE ATOMS=2,5    # C1=C2 double bond
+
+
+# ---- Force-Kernel ABF (internal extended Lagrangian) ----
+fk: FKERNELABF ...
+
+    # Extended Lagrangian (fictitious particle dynamics)
+    ARG=d1,d2
+    KAPPA=4000.0,6000.0
+    TAU=0.1,0.1
+    FRICTION=8.0,8.0
+    TEMP=300
+
+    # Early-sampling boost (density-based)
+    GRIDMIN=1.3,1.25
+    GRIDMAX=3.9,1.8
+    SIGMA=0.03,0.02
+    SIGMA_MIN=0.02,0.01
+    PACE=1
+    GRIDPACE=200
+    BIASFACTOR=12
+
+    # Output options
+    CZARSTRIDE=200
+    KERNELINFOSTRIDE=10
+...
+
+PRINT ARG=* STRIDE=10 FILE=COLVAR
+

@@ -4,15 +4,6 @@ UNITS NATURAL
 
 d1: DISTANCE ATOMS=1,2 COMPONENTS
 
-# --- Define the Muller-Brown potential ---
-# V(x,y) = sum_{k=1}^{4} A_k * exp[ a_k*(x-x0_k)^2 + b_k*(x-x0_k)*(y-y0_k) + c_k*(y-y0_k)^2 ]
-#
-# Parameters:
-#   k=1: A=-200, a=-1,   b=0,   c=-10,  x0=1,    y0=0
-#   k=2: A=-100, a=-1,   b=0,   c=-10,  x0=0,    y0=0.5
-#   k=3: A=-170, a=-6.5, b=11,  c=-6.5, x0=-0.5, y0=1.5
-#   k=4: A=15,   a=0.7,  b=0.6, c=0.7,  x0=-1,   y0=1
-
 ff: MATHEVAL ...
   ARG=d1.x,d1.y
   PERIODIC=NO
@@ -41,14 +32,12 @@ fk: FKERNELABF ...
     PACE=5
     GRIDPACE=1000
 
-    # Boost (helpful for early exploration of 3-basin surface)
+    # Boost
     BIASFACTOR=1
 
     # Output
     CZARSTRIDE=50000
-    KERNELINFOSTRIDE=50   # optional: override default stride (PACE) to match PRINT STRIDE
-                            # KERNELINFO is always written automatically by the plugin
-                            # pass to fkabf_analysis.py via --kernelinfo KERNELINFO
+    KERNELINFOSTRIDE=50 
 ...
 
 

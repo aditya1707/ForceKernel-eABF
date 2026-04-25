@@ -1,0 +1,34 @@
+LOAD FILE=forcekernel.cpp
+
+WHOLEMOLECULES ENTITY0=1-22
+phi: TORSION ATOMS=5,7,9,15
+psi: TORSION ATOMS=7,9,15,17
+
+# ---- Force-Kernel ABF (internal extended Lagrangian) ----
+fk: FKERNELABF ...
+
+    # Extended Lagrangian (fictitious particle dynamics)
+    ARG=phi,psi
+    KAPPA=3000.0,3000.0
+    TAU=0.5,0.5
+    FRICTION=8.0,8.0
+    TEMP=298.15
+
+    # Kernel options
+    SIGMA=0.2,0.2
+    SIGMA_MIN=0.05,0.05
+    PACE=1                    # How often to sample the gradient
+    GRIDPACE=1000             # How often we update the biasing forces
+    GRIDSIZE=100              # Grid size for applying bias (keep it small, default=72)
+
+    # Early-sampling boost (density-based)
+    BIASFACTOR=8
+    EXPLORSCALE=1.0,1.0
+
+    # Output options
+    KERNELSTRIDE=50000
+    CZARSTRIDE=50000
+    KERNELINFOSTRIDE=500
+...
+
+PRINT STRIDE=500 ARG=* FILE=COLVAR

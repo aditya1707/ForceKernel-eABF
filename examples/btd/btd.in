@@ -1,0 +1,61 @@
+&CONTROL
+  calculation   = 'md'
+  title         = 'btd'
+  prefix        = 'btd'
+  pseudo_dir    = './pseudo/'
+  outdir        = './tmp/'
+  tstress       = .false.
+  dt            = 10.34                ! 0.5 fs
+  nstep         = 60000                
+  disk_io       = 'minimal'
+  iprint        = 10
+/
+
+&SYSTEM
+  ibrav         = 1
+  A             = 15.0
+  nat           = 10
+  ntyp          = 2
+  ecutwfc       = 35.0                 
+  ecutrho       = 140.0
+  input_dft     = 'PBE'
+  vdw_corr      = 'dft-d3'
+  dftd3_version = 4
+  nosym         = .true.
+/
+
+&ELECTRONS
+  electron_maxstep = 200
+  conv_thr         = 1.0d-7           
+  mixing_mode      = 'plain'
+  mixing_beta      = 0.7
+  diagonalization  = 'david'
+  startingwfc      = 'atomic+random'
+/
+
+&IONS
+  ion_dynamics      = 'verlet'
+  ion_temperature   = 'svr'
+  tempw             = 300.0
+  nraise            = 100              
+  pot_extrapolation = 'second-order'
+  wfc_extrapolation = 'second-order'
+/
+
+ATOMIC_SPECIES
+  C   12.011   C_ONCV_PBE-1.2.upf
+  H    1.008   H_ONCV_PBE-1.2.upf
+
+ATOMIC_POSITIONS {angstrom}
+  H         6.5880        6.0614        6.0131
+  C         6.3818        7.1481        6.1159
+  H         5.5029        7.5409        5.5249
+  H         6.9543        8.9385        6.9916
+  C         7.0742        7.8274        6.9679
+  H         8.4639        6.2085        7.4096
+  C         8.1716        7.2056        7.7708
+  H         8.5531        8.7161        9.1624
+  H         9.4971        7.0666        9.4751
+  C         8.7671        7.6938        8.8648
+
+K_POINTS {gamma}
