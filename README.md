@@ -71,7 +71,7 @@ flowchart TD
     Sigma -->|Yes| SS[SIGMA = bin width<br/>SIGMA_MIN ≈ SIGMA / 2<br/>GRIDSIZE = 0 auto]
     Sigma -->|No| SA[Omit SIGMA<br/>adaptive warmup auto-detects σ₀<br/>still set SIGMA_MIN]
 
-    SS --> Kappa[KAPPA: pick so coupling width<br/>√(kT/κ) is much smaller than SIGMA_MIN<br/>typical 1000–5000 kJ/mol/unit²]
+    SS --> Kappa["KAPPA: pick so coupling width<br/>√(kT/κ) is much smaller than SIGMA_MIN<br/>typical 1000–5000 kJ/mol/unit²"]
     SA --> Kappa
 
     Kappa --> Engine{Classical MD<br/>or AIMD?}
