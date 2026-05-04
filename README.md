@@ -6,6 +6,15 @@ FK-eABF is an adaptive biasing force method that uses an extended Lagrangian (fi
 
 ---
 
+## Citation
+
+If you use FK-eABF in your work, please cite:
+
+> Kang, C.; Verma, R.; Sonpal, A.; Shoji, A.; Chipot, C.; Pfaendtner, J. *A Force-Kernel Reformulation of the Extended-System Adaptive Biasing Force for Free-Energy Calculations*. *J. Chem. Theory Comput.*, **submitted (2026)**.
+> DOI: *to be added upon acceptance*.
+
+---
+
 ## Requirements
 
 - PLUMED (with `forcekernel.cpp` compiled as a plugin via `LOAD`)
@@ -60,30 +69,27 @@ PRINT FILE=COLVAR STRIDE=500 ARG=*
 If you're setting up a new system, the following decision tree walks through the main parameter choices in roughly the order they should be made:
 
 ```mermaid
+%%{init: {'flowchart': {'nodeSpacing': 25, 'rankSpacing': 35}}}%%
 flowchart TD
-    Start([Configuring FKERNELABF]) --> CV{Is your CV<br/>periodic?<br/>e.g. a dihedral}
-    CV -->|Yes| CVP[Bounds taken from CV period<br/>GRIDMIN / GRIDMAX not needed]
-    CV -->|No| CVN[Set GRIDMIN, GRIDMAX<br/>reflecting walls auto-applied]
-
-    CVP --> Sigma{Know a sensible<br/>bin width<br/>from prior eABF<br/>or metadynamics?}
-    CVN --> Sigma
+    Start([Configure FKERNELABF]) --> CV{Periodic CV?}
+    CV -->|No| CVN[Set GRIDMIN, GRIDMAX]
+    CV -->|Yes| Sigma
+    CVN --> Sigma{Bin width<br/>known?}
 
     Sigma -->|Yes| SS[SIGMA = bin width<br/>SIGMA_MIN ≈ SIGMA / 2]
-    Sigma -->|No| SA[Omit SIGMA<br/>adaptive warmup auto-detects σ₀<br/>still set SIGMA_MIN]
+    Sigma -->|No| SA[Omit SIGMA, set SIGMA_MIN<br/>adaptive σ₀ warmup]
 
-    SS --> Kappa["KAPPA: pick so coupling width<br/>√(kT/κ) is much smaller than SIGMA_MIN<br/>typical 1000–5000 kJ/mol/unit²"]
+    SS --> Kappa["KAPPA so √(kT/κ) ≪ SIGMA_MIN<br/>typically 1000–5000"]
     SA --> Kappa
 
-    Kappa --> Engine{Classical MD<br/>or AIMD?}
+    Kappa --> Engine{Engine?}
     Engine -->|Classical| MD[GRIDPACE 500–1000]
-    Engine -->|AIMD| AIMD[PACE = 1<br/>GRIDPACE 50–200]
+    Engine -->|AIMD| AIMD[PACE = 1, GRIDPACE 50–200]
 
-    MD --> BiasFactor[BIASFACTOR &gt; 1<br/>typically 2–10]
-    AIMD --> BiasFactor
-
-    BiasFactor --> Out[CZARSTRIDE: set as often as necessary<br/>KERNELINFOSTRIDE = your PRINT STRIDE]
-
-    Out --> End([Run simulation])
+    MD --> Bias[BIASFACTOR 2–10]
+    AIMD --> Bias
+    Bias --> Out[CZARSTRIDE as needed<br/>KERNELINFOSTRIDE = PRINT STRIDE]
+    Out --> End([Run])
 ```
 
 **TLDR; set `SIGMA`, `SIGMA_MIN`, and `GRIDSIZE` (plus `GRIDMIN`/`GRIDMAX` for non-periodic CVs). Everything else can be left at its default.** The three parameters above are technically optional but should be treated as mandatory in practice — getting them right is the difference between a simulation that converges efficiently and one that wastes compute time.
@@ -318,6 +324,6 @@ FK-eABF is designed to converge quickly, but fast convergence does not absolve t
 
 **Verify extended-system synchronization.** All extended-system ABF methods rely on λ remaining well coupled to z; if they desynchronize, CZAR receives corrupted force samples. Confirm that the z − λ distribution is centered at zero with a width consistent with σ ≈ √(kT/κ) — `fkabf_diagnostics.py` produces this histogram automatically (`fig_phase.pdf`, `fig_trajectory.pdf`). A bimodal, skewed, or excessively broad distribution means κ or τ should be adjusted before trusting the result.
 
-**Run multiple independent replicas.** A single trajectory that appears converged may have settled into a local minimum of the estimator without sampling all relevant basins. Run at least two — preferably three — independent replicas from different initial conditions and compare the resulting FELs. Agreement between replicas, not internal self-agreement of a single run, is the minimum standard for convergence.
+**Run multiple independent replicas.** A single trajectory that appears converged may have settled into a local minimum of the estimator without sampling all relevant basins. Run at least two — preferably three — independent replicas from different initial conditions and compare the resulting FELs. Agreement between replicas, not internal smoothness of a single run, is the minimum standard for convergence.
 
 **Cross-method validation.** Self-consistency within a single method is necessary but not sufficient: simulations can satisfy every standard self-convergence criterion while producing quantitatively incorrect free-energy profiles. For at least one system in any study, run a parallel calculation with an independent method (OPES, WTM-eABF, REUS) and compare. Cross-method agreement is the only reliable criterion currently available for validating free-energy calculations on systems where the true answer is unknown.
