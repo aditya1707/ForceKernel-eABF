@@ -1,3 +1,6 @@
+; FK-eABF example input
+; Run with GROMACS 2024.3 and PLUMED 2.9.3
+;
 integrator              = md
 dt                      = 0.002
 nsteps                  = 750000000
