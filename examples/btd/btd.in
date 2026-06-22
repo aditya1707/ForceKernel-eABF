@@ -1,3 +1,6 @@
+! FK-eABF example input
+! Run with Quantum ESPRESSO 7.2 (pw.x / PWSCF v.7.2) and PLUMED 2.9.3
+!
 &CONTROL
   calculation   = 'md'
   title         = 'btd'
