@@ -10,9 +10,8 @@ FK-eABF is an adaptive biasing force method that uses an extended Lagrangian (fi
 
 If you use FK-eABF in your work, please cite:
 
-> Kang, C.; Verma, R.; Sonpal, A.; Shoji, A.; Chipot, C.; Pfaendtner, J. *A Force-Kernel Reformulation of the Extended-System Adaptive Biasing Force for Free-Energy Calculations*. *J. Chem. Theory Comput.*, **submitted (2026)**.
-> DOI: *to be added upon acceptance*.
-
+> Kang, C.; Verma, R.; Sonpal, A.; Shoji, A.; Chipot, C.; Pfaendtner, J. *A Force-Kernel Reformulation of the Extended-System Adaptive Biasing Force for Free-Energy Calculations*. *J. Chem. Theory Comput.* **2026**.
+> DOI: [10.1021/acs.jctc.6c00879](https://doi.org/10.1021/acs.jctc.6c00879).
 ---
 
 ## Requirements
